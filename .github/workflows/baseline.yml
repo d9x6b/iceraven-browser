@@ -1,0 +1,112 @@
+name: Baseline Android build
+
+on:
+  pull_request:
+    branches: [iceraven]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: baseline-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev/baseline')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source and pinned submodule
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: 'true'
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Prepare SDK and upstream build inputs
+        shell: bash
+        run: |
+          bash -e -o pipefail automation/iceraven/install-sdk.sh
+          bash -e -o pipefail automation/iceraven/patch_android_components.sh
+          bash -e -o pipefail automation/iceraven/setup_venv.sh
+          git submodule status
+          free -h
+
+      - name: Prepare isolated test identity and upstream branding
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/build.gradle')
+          s = p.read_text()
+          start = s.index('        forkRelease releaseTemplate >> {')
+          end = s.index('        benchmark releaseTemplate >> {', start)
+          block = s[start:end]
+          replacements = {
+              'applicationIdSuffix ".iceraven"': 'applicationIdSuffix ".iceraven.baseline"',
+              'def deepLinkSchemeValue = "iceraven"': 'def deepLinkSchemeValue = "iceraven-baseline"',
+              '"io.github.forkmaintainers.iceraven.sharedID"': '"io.github.forkmaintainers.iceraven.baseline.sharedID"',
+          }
+          for old, new in replacements.items():
+              if block.count(old) != 1:
+                  raise SystemExit(f'Expected exactly one occurrence: {old}')
+              block = block.replace(old, new)
+          p.write_text(s[:start] + block + s[end:])
+          PY
+          sed -i 's/Firefox/Iceraven/g' app/src/*/res/values*/*strings.xml
+          sed -i '/about_content/s/Mozilla/@forkmaintainers/' app/src/*/res/values*/*strings.xml
+          sed -i '/<string name="trackers_blocked_panel_categorical_num_trackers_blocked">/s/%s/%1$s/g; /<string name="trackers_blocked_panel_categorical_num_trackers_blocked">/s/%d/%2$d/g' app/src/*/res/values*/*strings.xml
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+
+      - name: Build release-like ARM64 baseline
+        shell: bash
+        env:
+          GRADLE_OPTS: '-Dorg.gradle.jvmargs="-XX:MaxMetaspaceSize=4g -Xms1g -Xmx7g -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/dev/stderr"'
+        run: |
+          version="$(git describe --tags --always HEAD)"
+          /usr/bin/time -v ./gradlew app:assembleForkRelease -PversionName="$version" -PbenchmarkTest --stacktrace --no-daemon
+
+      - name: Sign and verify disposable test APK
+        shell: bash
+        run: |
+          sdk="$HOME/android-sdk/android-sdk-linux"
+          tools="$sdk/build-tools/37.0.0"
+          unsigned="gradle/build/app/outputs/apk/forkRelease/app-arm64-v8a-forkRelease.apk"
+          test -f "$unsigned"
+          test -x "$tools/apksigner"
+          mkdir -p baseline-artifact
+          keystore="$RUNNER_TEMP/baseline-test.p12"
+          # Disposable test identity only. Never use for a production release.
+          keytool -genkeypair -keystore "$keystore" -storetype PKCS12 -storepass baseline-test-only -keypass baseline-test-only -alias baseline -keyalg RSA -keysize 2048 -validity 365 -dname 'CN=Iceraven disposable baseline test'
+          "$tools/apksigner" sign --ks "$keystore" --ks-key-alias baseline --ks-pass pass:baseline-test-only --key-pass pass:baseline-test-only --out baseline-artifact/iceraven-baseline-arm64.apk "$unsigned"
+          "$tools/apksigner" verify --verbose --print-certs baseline-artifact/iceraven-baseline-arm64.apk > baseline-artifact/signature.txt
+          "$tools/aapt2" dump badging baseline-artifact/iceraven-baseline-arm64.apk > baseline-artifact/badging.txt
+          grep -F "package: name='io.github.forkmaintainers.iceraven.baseline'" baseline-artifact/badging.txt
+          grep -F "'arm64-v8a'" baseline-artifact/badging.txt
+          git rev-parse HEAD > baseline-artifact/revision.txt
+          git submodule status >> baseline-artifact/revision.txt
+          (cd baseline-artifact && sha256sum iceraven-baseline-arm64.apk > SHA256SUMS)
+          printf '%s\n' 'Test-only APK. Signing key changes each build: uninstall previous baseline before updating; test profile data will be lost.' > baseline-artifact/README.txt
+          rm -f "$keystore"
+
+      - name: Upload test APK and verification records
+        uses: actions/upload-artifact@v7
+        with:
+          name: iceraven-baseline-arm64-${{ github.run_id }}
+          path: baseline-artifact/
+          if-no-files-found: error
+          retention-days: 14
