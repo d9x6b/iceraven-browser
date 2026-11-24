@@ -1,0 +1,1916 @@
+# Kiwi-inspired Iceraven debug APK build. Not an official Iceraven or Kiwi release.
+# This includes the source patch explicitly, so only ONE file needs to be uploaded.
+name: Iceraven Kiwi OLED – Preview v0.2.1
+
+on:
+  push:
+    branches:
+      - kiwi-preview-2026
+    paths:
+      - .github/workflows/kiwi-oled-v021-apk.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout Iceraven with Android Components submodule
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Apply Kiwi-inspired settings patch (embedded below)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/kiwi-display.patch" <<'KIWI_DISPLAY_PATCH'
+          diff --git a/app/src/main/java/org/mozilla/fenix/HomeActivity.kt b/app/src/main/java/org/mozilla/fenix/HomeActivity.kt
+          index c81f5f6..d99360a 100644
+          --- a/app/src/main/java/org/mozilla/fenix/HomeActivity.kt
+          +++ b/app/src/main/java/org/mozilla/fenix/HomeActivity.kt
+          @@ -187,6 +187,7 @@ import org.mozilla.fenix.perf.StartupTimeline
+           import org.mozilla.fenix.perf.StartupTypeTelemetry
+           import org.mozilla.fenix.privacyreport.PrivacyReportNotificationScheduler
+           import org.mozilla.fenix.session.PrivateNotificationService
+          +import org.mozilla.fenix.settings.KiwiDisplayController
+           import org.mozilla.fenix.settings.SupportUtils
+           import org.mozilla.fenix.shortcut.NewTabShortcutIntentProcessor.Companion.ACTION_OPEN_PRIVATE_TAB
+           import org.mozilla.fenix.splashscreen.ApplyExperimentsOperation
+          @@ -834,9 +835,17 @@ open class HomeActivity : LocaleAwareAppCompatActivity(), NavHostActivity, Crash
+                   }
+               }
+           
+          +    private val kiwiDisplayController by lazy { KiwiDisplayController(this, components.settings.preferences) }
+          +
+          +    /** Reapply changed display preferences immediately from the customization screen. */
+          +    fun applyKiwiDisplayControls() {
+          +        kiwiDisplayController.apply()
+          +    }
+          +
+               @CallSuper
+               override fun onResume() {
+                   super.onResume()
+          +        applyKiwiDisplayControls()
+           
+                   // Diagnostic breadcrumb for "Display already aquired" crash:
+                   // https://github.com/mozilla-mobile/android-components/issues/7960
+          @@ -955,6 +964,7 @@ open class HomeActivity : LocaleAwareAppCompatActivity(), NavHostActivity, Crash
+               }
+           
+               final override fun onPause() {
+          +        kiwiDisplayController.release()
+                   // We should return to the browser if there were normal tabs when we left the app
+                   components.settings.shouldReturnToBrowser =
+                       components.core.store.state.getNormalOrPrivateTabs(private = false).isNotEmpty()
+          diff --git a/app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt b/app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt
+          index 3345167..cb3fa84 100644
+          --- a/app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt
+          +++ b/app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt
+          @@ -9,6 +9,7 @@ import android.content.res.Configuration
+           import android.os.Build
+           import android.os.Build.VERSION.SDK_INT
+           import android.os.Bundle
+          +import androidx.core.content.edit
+           import android.view.View
+           import androidx.appcompat.app.AppCompatDelegate
+           import androidx.lifecycle.Lifecycle
+          @@ -16,6 +17,7 @@ import androidx.lifecycle.lifecycleScope
+           import androidx.lifecycle.repeatOnLifecycle
+           import androidx.navigation.fragment.navArgs
+           import androidx.preference.EditTextPreference
+          +import androidx.preference.ListPreference
+           import androidx.preference.Preference
+           import androidx.preference.PreferenceCategory
+           import androidx.preference.PreferenceFragmentCompat
+          @@ -25,6 +27,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
+           import kotlinx.coroutines.launch
+           import mozilla.components.feature.summarize.settings.SummarizationSettings
+           import org.mozilla.fenix.FeatureFlags
+          +import org.mozilla.fenix.HomeActivity
+           import org.mozilla.fenix.GleanMetrics.AppTheme
+           import org.mozilla.fenix.GleanMetrics.CustomizationSettings
+           import org.mozilla.fenix.GleanMetrics.PullToRefreshInBrowser
+          @@ -41,7 +44,6 @@ import org.mozilla.fenix.settings.settingssearch.PreferenceFileInformation.Custo
+           import org.mozilla.fenix.settings.settingssearch.SettingsSearchItem
+           import org.mozilla.fenix.settings.settingssearch.SettingsSearchProvider
+           import org.mozilla.fenix.translations.TranslationsEnabledSettings
+          -import org.mozilla.fenix.utils.Settings
+           import org.mozilla.fenix.utils.view.addToRadioGroup
+           
+           /** Lets the user customize the UI. */
+          @@ -124,7 +126,7 @@ class CustomizationFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFrag
+           
+                   // if tab strip is enabled, swipe toolbar to switch tabs should not be enabled so the
+                   // preference is not shown
+          -        val tabletAndTabStripEnabled = Settings(requireContext()).isTabStripEnabled
+          +        val tabletAndTabStripEnabled = requireComponents.settings.isTabStripEnabled
+                   setupGesturesCategory(
+                       isSwipeToolbarToSwitchTabsVisible = !tabletAndTabStripEnabled,
+                       isSummarizationEnabled = status.isSummarizationFeatureEnabled,
+          @@ -135,6 +137,7 @@ class CustomizationFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFrag
+                   setupAddonsCustomizationCategory()
+                   setupSystemBehaviorCategory()
+                   setupOtherCustomizationCategory()
+          +        setupKiwiDisplayControls()
+               }
+           
+               private fun updateToolbarShortcut() {
+          @@ -321,7 +324,7 @@ class CustomizationFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFrag
+                   val tabStripSwitch = requirePreference<SwitchPreferenceCompat>(R.string.pref_key_tab_strip_show)
+                   val context = requireContext()
+           
+          -        tabStripSwitch.isChecked = Settings(requireContext()).isTabStripEnabled
+          +        tabStripSwitch.isChecked = requireComponents.settings.isTabStripEnabled
+           
+                   tabStripSwitch.setOnPreferenceChangeListener { _, newValue ->
+                       val enabled = newValue as Boolean
+          @@ -440,6 +443,60 @@ class CustomizationFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFrag
+                   }
+               }
+           
+          +    /** Iceraven's own preference store; intentionally not Android's default preference file. */
+          +    private fun setupKiwiDisplayControls() {
+          +        val stored = requireComponents.settings.preferences
+          +
+          +        findPreference<SwitchPreferenceCompat>(KiwiDisplayController.KEEP_AWAKE_KEY)?.apply {
+          +            isPersistent = false
+          +            isChecked = stored.getBoolean(KiwiDisplayController.KEEP_AWAKE_KEY, false)
+          +            onPreferenceChangeListener = Preference.OnPreferenceChangeListener { _, next ->
+          +                val enabled = next as? Boolean
+          +                if (enabled == null) {
+          +                    false
+          +                } else {
+          +                    stored.edit { putBoolean(KiwiDisplayController.KEEP_AWAKE_KEY, enabled) }
+          +                    (activity as? HomeActivity)?.applyKiwiDisplayControls()
+          +                    true
+          +                }
+          +            }
+          +        }
+          +
+          +        findPreference<ListPreference>(KiwiDisplayController.ORIENTATION_KEY)?.apply {
+          +            isPersistent = false
+          +            value = KiwiDisplayController.validOrientation(
+          +                stored.getString(KiwiDisplayController.ORIENTATION_KEY, KiwiDisplayController.SYSTEM),
+          +            )
+          +            onPreferenceChangeListener = Preference.OnPreferenceChangeListener { _, next ->
+          +                val selected = next as? String
+          +                if (selected == null || KiwiDisplayController.validOrientation(selected) != selected) {
+          +                    false
+          +                } else {
+          +                    stored.edit { putString(KiwiDisplayController.ORIENTATION_KEY, selected) }
+          +                    (activity as? HomeActivity)?.applyKiwiDisplayControls()
+          +                    true
+          +                }
+          +            }
+          +        }
+          +
+          +        findPreference<ListPreference>(KiwiDisplayController.BRIGHTNESS_KEY)?.apply {
+          +            isPersistent = false
+          +            value = KiwiDisplayController.validBrightness(
+          +                stored.getString(KiwiDisplayController.BRIGHTNESS_KEY, KiwiDisplayController.SYSTEM),
+          +            )
+          +            onPreferenceChangeListener = Preference.OnPreferenceChangeListener { _, next ->
+          +                val selected = next as? String
+          +                if (selected == null || KiwiDisplayController.validBrightness(selected) != selected) {
+          +                    false
+          +                } else {
+          +                    stored.edit { putString(KiwiDisplayController.BRIGHTNESS_KEY, selected) }
+          +                    (activity as? HomeActivity)?.applyKiwiDisplayControls()
+          +                    true
+          +                }
+          +            }
+          +        }
+          +    }
+          +
+               private fun setupOtherCustomizationCategory() {
+           
+                   requirePreference<SwitchPreferenceCompat>(R.string.pref_key_show_fullscreen_toast).apply {
+          diff --git a/app/src/main/java/org/mozilla/fenix/settings/KiwiDisplayController.kt b/app/src/main/java/org/mozilla/fenix/settings/KiwiDisplayController.kt
+          new file mode 100644
+          index 0000000..d528b75
+          --- /dev/null
+          +++ b/app/src/main/java/org/mozilla/fenix/settings/KiwiDisplayController.kt
+          @@ -0,0 +1,118 @@
+          +/* This Source Code Form is subject to the terms of the Mozilla Public
+          + * License, v. 2.0. If a copy of the MPL was not distributed with this
+          + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+          +
+          +package org.mozilla.fenix.settings
+          +
+          +import android.app.Activity
+          +import android.content.SharedPreferences
+          +import android.content.pm.ActivityInfo
+          +import android.view.WindowManager
+          +
+          +/**
+          + * Optional display controls. Uses the app's existing `fenix_preferences` store.
+          + * Owns only flags it enabled; restores the previous brightness when the app is paused.
+          + * The default values leave the original browser behavior unchanged.
+          + */
+          +internal class KiwiDisplayController(
+          +    private val activity: Activity,
+          +    private val preferences: SharedPreferences,
+          +) {
+          +    private var awakeByKiwi = false
+          +    private var priorBrightness: Float? = null
+          +    private var priorOrientation: Int? = null
+          +
+          +    fun apply() {
+          +        val keepAwake = preferences.getBoolean(KEEP_AWAKE_KEY, false)
+          +        if (keepAwake && !awakeByKiwi) {
+          +            activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+          +            awakeByKiwi = true
+          +        } else if (!keepAwake && awakeByKiwi) {
+          +            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+          +            awakeByKiwi = false
+          +        }
+          +
+          +        val orientation = when (validOrientation(preferences.getString(ORIENTATION_KEY, SYSTEM))) {
+          +            PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+          +            LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+          +            else -> null
+          +        }
+          +        if (orientation == null) {
+          +            // Do not override onboarding / application orientation policy by default.
+          +            priorOrientation?.let { activity.requestedOrientation = it }
+          +            priorOrientation = null
+          +        } else {
+          +            if (priorOrientation == null) {
+          +                priorOrientation = activity.requestedOrientation
+          +            }
+          +            if (activity.requestedOrientation != orientation) {
+          +                activity.requestedOrientation = orientation
+          +            }
+          +        }
+          +
+          +        val value = validBrightness(preferences.getString(BRIGHTNESS_KEY, SYSTEM))
+          +        val brightness = brightnessFraction(value)
+          +        if (brightness == null) {
+          +            restoreBrightness()
+          +        } else {
+          +            if (priorBrightness == null) {
+          +                priorBrightness = activity.window.attributes.screenBrightness
+          +            }
+          +            activity.window.attributes = activity.window.attributes.apply {
+          +                screenBrightness = brightness
+          +            }
+          +        }
+          +    }
+          +
+          +    /** Releases only the temporary changes this controller owns. */
+          +    fun release() {
+          +        if (awakeByKiwi) {
+          +            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+          +            awakeByKiwi = false
+          +        }
+          +        restoreBrightness()
+          +    }
+          +
+          +    private fun restoreBrightness() {
+          +        priorBrightness?.let { previous ->
+          +            activity.window.attributes = activity.window.attributes.apply {
+          +                screenBrightness = previous
+          +            }
+          +        }
+          +        priorBrightness = null
+          +    }
+          +
+          +    companion object {
+          +        const val KEEP_AWAKE_KEY = "kiwi_display_keep_awake"
+          +        const val ORIENTATION_KEY = "kiwi_display_orientation"
+          +        const val BRIGHTNESS_KEY = "kiwi_display_brightness"
+          +        const val SYSTEM = "system"
+          +        private const val PORTRAIT = "portrait"
+          +        private const val LANDSCAPE = "landscape"
+          +
+          +        fun validOrientation(value: String?): String =
+          +            when (value) {
+          +                PORTRAIT -> PORTRAIT
+          +                LANDSCAPE -> LANDSCAPE
+          +                else -> SYSTEM
+          +            }
+          +
+          +        fun validBrightness(value: String?): String =
+          +            when (value) {
+          +                "25" -> "25"
+          +                "50" -> "50"
+          +                "75" -> "75"
+          +                "100" -> "100"
+          +                else -> SYSTEM
+          +            }
+          +
+          +        fun brightnessFraction(value: String?): Float? =
+          +            when (validBrightness(value)) {
+          +                "25" -> 0.25f
+          +                "50" -> 0.5f
+          +                "75" -> 0.75f
+          +                "100" -> 1.0f
+          +                else -> null
+          +            }
+          +    }
+          +}
+          diff --git a/app/src/main/java/org/mozilla/fenix/settings/SharedPreferenceUpdater.kt b/app/src/main/java/org/mozilla/fenix/settings/SharedPreferenceUpdater.kt
+          index f1b45bc..f53e982 100644
+          --- a/app/src/main/java/org/mozilla/fenix/settings/SharedPreferenceUpdater.kt
+          +++ b/app/src/main/java/org/mozilla/fenix/settings/SharedPreferenceUpdater.kt
+          @@ -6,7 +6,6 @@ package org.mozilla.fenix.settings
+           
+           import androidx.core.content.edit
+           import androidx.preference.Preference
+          -import mozilla.components.support.base.log.logger.Logger
+           import org.mozilla.fenix.R
+           import org.mozilla.fenix.ext.components
+           
+          @@ -16,23 +15,21 @@ import org.mozilla.fenix.ext.components
+            */
+           open class SharedPreferenceUpdater : Preference.OnPreferenceChangeListener {
+           
+          -   private val logger = Logger("SharedPreferenceUpdater")
+          -
+               override fun onPreferenceChange(preference: Preference, newValue: Any?): Boolean {
+                   if (newValue is Boolean) {
+                       preference.context.components.settings.preferences.edit {
+                           putBoolean(preference.key, newValue)
+                       }
+                   } else if (newValue is String) {
+          -            preference.context.components.settings.preferences.edit {
+          -                putString(preference.key, newValue)
+          -            }
+          -            logger.info("Set string preference ${preference.key} to $newValue")
+          -            if (preference.key == preference.context.getString(R.string.pref_key_addons_custom_account) ||
+          -                preference.key == preference.context.getString(R.string.pref_key_addons_custom_collection)
+          -            ) {
+          -                logger.info("Preference suggests clearing add-on cache")
+          -                preference.context.components.clearAddonCache()
+          +            val stored = preference.context.components.settings.preferences
+          +            val changed = stored.getString(preference.key, null) != newValue
+          +            if (changed) {
+          +                stored.edit { putString(preference.key, newValue) }
+          +                if (preference.key == preference.context.getString(R.string.pref_key_addons_custom_account) ||
+          +                    preference.key == preference.context.getString(R.string.pref_key_addons_custom_collection)
+          +                ) {
+          +                    preference.context.components.clearAddonCache()
+          +                }
+                       }
+                   }
+                   return true
+          diff --git a/app/src/main/res/values-de/kiwi_display.xml b/app/src/main/res/values-de/kiwi_display.xml
+          new file mode 100644
+          index 0000000..9731a20
+          --- /dev/null
+          +++ b/app/src/main/res/values-de/kiwi_display.xml
+          @@ -0,0 +1,33 @@
+          +<?xml version="1.0" encoding="utf-8"?>
+          +<!-- MPL-2.0; ergänzende Ressourcen für den inoffiziellen Fork. -->
+          +<resources>
+          +    <string name="kiwi_display_controls_title">Erweiterte Anzeigeoptionen</string>
+          +    <string name="kiwi_keep_awake_title">Bildschirm eingeschaltet lassen</string>
+          +    <string name="kiwi_keep_awake_description">Verhindert den Standby, solange der Browser im Vordergrund ist. Erhöht den Akkuverbrauch.</string>
+          +    <string name="kiwi_orientation_title">Bildschirmausrichtung</string>
+          +    <string name="kiwi_brightness_title">Bildschirmhelligkeit im Browser</string>
+          +    <string-array name="kiwi_orientation_entries">
+          +        <item>Systemeinstellung</item>
+          +        <item>Hochformat</item>
+          +        <item>Querformat</item>
+          +    </string-array>
+          +    <string-array name="kiwi_orientation_values">
+          +        <item>system</item>
+          +        <item>portrait</item>
+          +        <item>landscape</item>
+          +    </string-array>
+          +    <string-array name="kiwi_brightness_entries">
+          +        <item>Systemhelligkeit</item>
+          +        <item>25%</item>
+          +        <item>50%</item>
+          +        <item>75%</item>
+          +        <item>100%</item>
+          +    </string-array>
+          +    <string-array name="kiwi_brightness_values">
+          +        <item>system</item>
+          +        <item>25</item>
+          +        <item>50</item>
+          +        <item>75</item>
+          +        <item>100</item>
+          +    </string-array>
+          +</resources>
+          diff --git a/app/src/main/res/values/kiwi_display.xml b/app/src/main/res/values/kiwi_display.xml
+          new file mode 100644
+          index 0000000..da94f97
+          --- /dev/null
+          +++ b/app/src/main/res/values/kiwi_display.xml
+          @@ -0,0 +1,33 @@
+          +<?xml version="1.0" encoding="utf-8"?>
+          +<!-- MPL-2.0; derived additions for an unofficial Iceraven settings fork. -->
+          +<resources>
+          +    <string name="kiwi_display_controls_title">Advanced display options</string>
+          +    <string name="kiwi_keep_awake_title">Keep screen on</string>
+          +    <string name="kiwi_keep_awake_description">Prevent sleep while the browser is in the foreground. Uses more battery.</string>
+          +    <string name="kiwi_orientation_title">Screen orientation</string>
+          +    <string name="kiwi_brightness_title">Browser screen brightness</string>
+          +    <string-array name="kiwi_orientation_entries">
+          +        <item>Follow Android</item>
+          +        <item>Portrait</item>
+          +        <item>Landscape</item>
+          +    </string-array>
+          +    <string-array name="kiwi_orientation_values">
+          +        <item>system</item>
+          +        <item>portrait</item>
+          +        <item>landscape</item>
+          +    </string-array>
+          +    <string-array name="kiwi_brightness_entries">
+          +        <item>System brightness</item>
+          +        <item>25%</item>
+          +        <item>50%</item>
+          +        <item>75%</item>
+          +        <item>100%</item>
+          +    </string-array>
+          +    <string-array name="kiwi_brightness_values">
+          +        <item>system</item>
+          +        <item>25</item>
+          +        <item>50</item>
+          +        <item>75</item>
+          +        <item>100</item>
+          +    </string-array>
+          +</resources>
+          diff --git a/app/src/main/res/xml/customization_preferences.xml b/app/src/main/res/xml/customization_preferences.xml
+          index 95acfbe..105bf44 100644
+          --- a/app/src/main/res/xml/customization_preferences.xml
+          +++ b/app/src/main/res/xml/customization_preferences.xml
+          @@ -172,6 +172,36 @@
+                       android:title="@string/preferences_relinquish_memory_title" />
+               </androidx.preference.PreferenceCategory>
+           
+          +    <!-- Optional, Kiwi-inspired display controls. Defaults preserve Iceraven behavior. -->
+          +    <androidx.preference.PreferenceCategory
+          +        android:key="kiwi_display_controls"
+          +        android:layout="@layout/preference_cat_style"
+          +        android:title="@string/kiwi_display_controls_title"
+          +        app:iconSpaceReserved="false">
+          +        <androidx.preference.SwitchPreferenceCompat
+          +            android:key="kiwi_display_keep_awake"
+          +            android:defaultValue="false"
+          +            android:persistent="false"
+          +            android:summary="@string/kiwi_keep_awake_description"
+          +            android:title="@string/kiwi_keep_awake_title" />
+          +        <androidx.preference.ListPreference
+          +            android:key="kiwi_display_orientation"
+          +            android:defaultValue="system"
+          +            android:persistent="false"
+          +            android:entries="@array/kiwi_orientation_entries"
+          +            android:entryValues="@array/kiwi_orientation_values"
+          +            android:title="@string/kiwi_orientation_title"
+          +            app:useSimpleSummaryProvider="true" />
+          +        <androidx.preference.ListPreference
+          +            android:key="kiwi_display_brightness"
+          +            android:defaultValue="system"
+          +            android:persistent="false"
+          +            android:entries="@array/kiwi_brightness_entries"
+          +            android:entryValues="@array/kiwi_brightness_values"
+          +            android:title="@string/kiwi_brightness_title"
+          +            app:useSimpleSummaryProvider="true" />
+          +    </androidx.preference.PreferenceCategory>
+          +
+               <androidx.preference.PreferenceCategory
+                   android:key="@string/pref_key_other_customization_category"
+                   android:layout="@layout/preference_cat_style"
+          diff --git a/app/src/test/java/org/mozilla/fenix/settings/KiwiDisplayControllerTest.kt b/app/src/test/java/org/mozilla/fenix/settings/KiwiDisplayControllerTest.kt
+          new file mode 100644
+          index 0000000..7a6f852
+          --- /dev/null
+          +++ b/app/src/test/java/org/mozilla/fenix/settings/KiwiDisplayControllerTest.kt
+          @@ -0,0 +1,29 @@
+          +/* This Source Code Form is subject to the terms of the Mozilla Public
+          + * License, v. 2.0. If a copy of the MPL was not distributed with this
+          + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+          +
+          +package org.mozilla.fenix.settings
+          +
+          +import org.junit.Assert.assertEquals
+          +import org.junit.Assert.assertNull
+          +import org.junit.Test
+          +
+          +class KiwiDisplayControllerTest {
+          +    @Test
+          +    fun `orientation only accepts supported values`() {
+          +        assertEquals("system", KiwiDisplayController.validOrientation(null))
+          +        assertEquals("system", KiwiDisplayController.validOrientation("landscape; rm -rf"))
+          +        assertEquals("portrait", KiwiDisplayController.validOrientation("portrait"))
+          +        assertEquals("landscape", KiwiDisplayController.validOrientation("landscape"))
+          +    }
+          +
+          +    @Test
+          +    fun `brightness maps supported values to fractions`() {
+          +        assertNull(KiwiDisplayController.brightnessFraction(null))
+          +        assertNull(KiwiDisplayController.brightnessFraction("garbage"))
+          +        assertEquals(0.25f, KiwiDisplayController.brightnessFraction("25")!!, 0f)
+          +        assertEquals(0.5f, KiwiDisplayController.brightnessFraction("50")!!, 0f)
+          +        assertEquals(0.75f, KiwiDisplayController.brightnessFraction("75")!!, 0f)
+          +        assertEquals(1f, KiwiDisplayController.brightnessFraction("100")!!, 0f)
+          +    }
+          +}
+          diff --git a/kiwi-tools/CHANGELOG_DE.md b/kiwi-tools/CHANGELOG_DE.md
+          new file mode 100644
+          index 0000000..1da2b1a
+          --- /dev/null
+          +++ b/kiwi-tools/CHANGELOG_DE.md
+          @@ -0,0 +1,21 @@
+          +# Änderungen gegenüber hochgeladenem Iceraven-Archiv
+          +
+          +## Neue funktionale Einstellungen
+          +
+          +- Neue Kategorie im **Anpassen**-Bildschirm, nicht in `preferences.xml` (im älteren Toolkit war die Einfügestelle falsch).
+          +- Persistente Werte im vorhandenen App-Store und sofortige Anwendung über `HomeActivity`.
+          +- Bildschirm wach, Orientierung und Fensterhelligkeit; bei Standardwerten keine Änderung der App-Ausrichtung und der Helligkeit.
+          +- Lebenszyklus-Freigabe für Bildschirm-Wachhalten und temporäre Helligkeit.
+          +- Strings auf Deutsch und Englisch.
+          +
+          +## Vereinfachungen und Fehlerprävention
+          +
+          +- Keine Protokollierung der Inhalte von String-Präferenzen in `SharedPreferenceUpdater`.
+          +- Keine unnötige Add-on-Cache-Leerung bei unverändertem Eintrag.
+          +- Zwei redundante Konstruktionen von `Settings(requireContext())` entfernt.
+          +
+          +## Prüfungen und Buildvorbereitung
+          +
+          +- XML- und Resource-Audit, Kotlin-Controller-Smoketests mit Android-Stubs, JUnit-Tests (erst nach Gradle-Build ausführbar).
+          +- Optionaler manueller GitHub-Actions-Workflow für eine Test-APK, **nicht ausgeführt**.
+          +- Kein Chromium- oder GeckoView-Engine-Quellcode geändert. Keine Drittbibliotheken blind entfernt.
+          diff --git a/kiwi-tools/PRUEFBERICHT_DE.md b/kiwi-tools/PRUEFBERICHT_DE.md
+          new file mode 100644
+          index 0000000..aa7624a
+          --- /dev/null
+          +++ b/kiwi-tools/PRUEFBERICHT_DE.md
+          @@ -0,0 +1,41 @@
+          +# Prüfbericht: Iceraven → Kiwi-inspirierte Edition
+          +
+          +**Basis:** vom Nutzer hochgeladenes `iceraven-browser-iceraven.zip` (4.137 Dateien; Quellpaket des Firefox-/GeckoView-Forks Iceraven). Die Änderungen beziehen sich auf diesen konkreten Versionsstand. Dieser Bericht ist kein Sicherheitszertifikat.
+          +
+          +## Befunde im Bestand
+          +
+          +1. **Einstellungen:** `app/src/main/res/xml/customization_preferences.xml` ist die tatsächliche Anpassen-Seite. Der frühere externe Werkzeugentwurf zielte fälschlich auf die allgemeine `preferences.xml` und wäre daher nicht korrekt angezeigt worden. Im vorliegenden Quellstand ist der neue Block an der richtigen Stelle angebunden.
+          +2. **Unnötiges Logging:** `SharedPreferenceUpdater.kt` schrieb neue String-Einstellungswerte in Logs, darunter Werte der benutzerdefinierten Add-on-Sammlung. Dies wurde entfernt.
+          +3. **Doppelte Arbeit:** Zwei Zugriffe auf `Settings(requireContext())` in `CustomizationFragment.kt` erzeugten jeweils ein neues Settings-Objekt, obwohl `requireComponents.settings` bereits existiert. Die beiden Aufrufe wurden umgestellt.
+          +4. **Unnötige Cache-Invalidierung:** Die Add-on-Cache-Leerung erfolgte bei `SharedPreferenceUpdater` auch bei einer unveränderten String-Auswahl. Sie wird nun nur nach echtem Wertwechsel aufgerufen.
+          +5. **Nicht entfernen:** Das `android:usesCleartextTraffic="true"` aus `AndroidManifest.xml` und die Basiskonfiguration in `network_security_config.xml` sind für allgemeine HTTP-Webseiten potenziell beabsichtigt. Ohne Ende-zu-Ende-Test darf ein Browser diese Fähigkeit nicht blind verlieren.
+          +6. **Nicht entfernen:** `FLAG_SECURE`-Logik im Privatmodus wird in mehreren Dateien verwendet. Keine pauschale Vereinfachung, da sie Privatsphäre oder Screenshot-Verhalten verschlechtern könnte.
+          +7. **Build-Lücke:** Der ZIP-Export enthält keinen Git-Submodul-Commit für `android-components` (leeres Verzeichnis), obwohl `.gitmodules` und `settings.gradle` darauf verweisen. Ein Git-Fork mit rekursivem Checkout ist erforderlich.
+          +
+          +## Umsetzung
+          +
+          +- Drei funktionale zusätzliche Darstellungsoptionen, Standardwerte greifen nicht in vorhandene Fensterpolitik ein.
+          +- 2 neue lokalisierte Ressourcen-XML-Dateien, 1 Controller und 1 Kotlin-JUnit-Testdatei.
+          +- Anbindung an XML-Präferenzen, App-SharedPreferences und `HomeActivity` mit Aktivierung beim Wiederaufnehmen und Freigabe beim Pausieren.
+          +- Vollständiger Originalquellcode bleibt im bearbeiteten ZIP erhalten.
+          +- Separater Git-Patch gegen das hochgeladene Originalarchiv und manueller CI-Workflow für ein Debug-APK.
+          +
+          +## Tatsächlich ausgeführte Prüfungen
+          +
+          +| Prüfung | Ergebnis |
+          +|---|---|
+          +| 517 App-Ressourcen-XML-Dateien geparst | 0 Parsefehler |
+          +| Neue XML-Präferenzschlüssel und Laufzeitbindung geprüft | 3/3 vorhanden |
+          +| Deutsch/Englisch und identische technische Listenwerte | bestanden |
+          +| Kotlin-Controller mit Android-Stubs per `kotlinc` kompiliert | bestanden |
+          +| Kotlin-Controller-Test (15 Assertions) | bestanden |
+          +| Git-Patch gegen frisch extrahiertes Original angewandt | bestanden |
+          +| Patch nach Anwenden erneut statisch geprüft | bestanden |
+          +| Vollständiger Gradle-/Android-Build | **nicht ausgeführt** (Android-Submodul/SDK/Gradle-Verteilung fehlen; kein Netzwerkzugriff) |
+          +| Gerätetest / tatsächliche APK | **nicht ausgeführt** |
+          +
+          +## Einschränkungen und nächster Prüfschritt
+          +
+          +Die Analysen betreffen hauptsächlich die geänderten Bereiche. Ein vollständiger manueller Sicherheits- und Laufzeit-Audit aller Kotlin-, Java-, XML-, Build- und Abhängigkeitsdateien ist **nicht** erfolgt. Die übrigen Quellen wurden nicht pauschal als fehlerfrei bewertet; vermeintlich ungenutzte Ressourcen wurden nicht ohne Beweis gelöscht.
+          +
+          +Die nächsten harten Prüfungen sind `./gradlew app:assembleForkDebug`, relevante JUnit-Tests und ein manueller Test auf einem Android-Gerät mit wechselnder Ausrichtung, Videowiedergabe, Privatmodus, Hintergrundwechsel und Erweiterungen.
+          diff --git a/kiwi-tools/README_DE.md b/kiwi-tools/README_DE.md
+          new file mode 100644
+          index 0000000..286068a
+          --- /dev/null
+          +++ b/kiwi-tools/README_DE.md
+          @@ -0,0 +1,69 @@
+          +# Iceraven mit Kiwi-inspirierten Anzeigeoptionen – Quellprojekt
+          +
+          +**Status:** Editierter Iceraven-Quellcode, **kein getesteter Android-Build, keine fertige APK**.
+          +
+          +Die ZIP in diesem Projekt stammt aus dem vom Nutzer bereitgestellten Iceraven-Archiv (Zweig `iceraven`, Export vom November 2026). Die Firefox-/GeckoView-Architektur wurde bewusst nicht ausgetauscht. Dies ist weder Kiwi Browser noch ein offizielles Iceraven-Release. Chrome-Web-Store-Erweiterungen werden damit **nicht** unterstützt.
+          +
+          +## Umsetzung
+          +
+          +Unter **Einstellungen → Anpassen → Erweiterte Anzeigeoptionen** gibt es:
+          +
+          +1. **Bildschirm eingeschaltet lassen**: setzt Android `FLAG_KEEP_SCREEN_ON` nur im aktiven App-Fenster. Im Hintergrund wird das Flag wieder freigegeben.
+          +2. **Bildschirmausrichtung**: Systemeinstellung / Hochformat / Querformat. Standardmäßig greift der Fork nicht in Iceravens bisherige Ausrichtungssteuerung ein. Android kann das Erzwingen der Ausrichtung bei bestimmten Gerätekategorien ignorieren.
+          +3. **Helligkeit im Browser**: Systemeinstellung / 25 % / 50 % / 75 % / 100 %. Der ursprüngliche Wert des Fensters wird bei Rückkehr zur Systemeinstellung oder Verlassen des Fensters wiederhergestellt; die globale Gerätehelligkeit wird **nicht** geändert.
+          +
+          +Neue Einstellungen werden im bestehenden `fenix_preferences`-Store gespeichert und unmittelbar angewandt. Bei Standardwerten werden die vorherigen Window-Flags nicht pauschal gelöscht. Verfügbar in Deutsch und Englisch, andere Sprachen erhalten die englischen Texte.
+          +
+          +## Konkrete Codepflege
+          +
+          +- `SharedPreferenceUpdater.kt`: entfernt unnötige Logs von String-Einstellungswerten; das Add-on-Cache wird nicht mehr geleert, wenn derselbe Wert erneut ausgewählt wird.
+          +- `CustomizationFragment.kt`: zweimaliges Erzeugen eines neuen `Settings`-Objekts durch Wiederverwendung der bestehenden `requireComponents.settings`-Instanz ersetzt.
+          +- Die bisherigen Funktionen (Erweiterungen, Tabs, private Fenster, Passwortspeicher, Site Permissions, Trackingschutz) wurden **nicht** entfernt. Bei dynamisch geladenen Ressourcen wäre blindes Löschen riskant.
+          +
+          +## Tests
+          +
+          +In einem Python-Umfeld:
+          +
+          +```bash
+          +python3 kiwi-tools/audit.py
+          +```
+          +
+          +Mit installiertem Kotlin-Compiler (`kotlinc`) und Java:
+          +
+          +```bash
+          +bash kiwi-tools/tests/run_controller_smoke.sh
+          +```
+          +
+          +Diese Tests prüfen XML, Einstellungs-Verdrahtung und den Controller mit Android-Testdoubles. Sie ersetzen **keinen Android-Build** oder einen Gerätetest.
+          +
+          +## APK aus dem GitHub-Fork erstellen (empfohlener Weg)
+          +
+          +1. Auf GitHub ein eigenes Fork von `fork-maintainers/iceraven-browser` anlegen. Das ist wichtig, um den **gepinnten Git-Submodul-Verweis für `android-components`** zu behalten. Ein reiner GitHub-Quellcode-ZIP-Export enthält diesen Git-Verweis nicht.
+          +2. Im Fork alle Änderungen aus `Iceraven-Kiwi-Erweiterungen.patch` anwenden (siehe unten). Die ZIP mit allen Dateien kann ebenfalls als Quellvergleich dienen; ein neues leeres Repository nur aus ZIP-Dateien hat aber keinen Submodul-Gitlink.
+          +3. Im eigenen Fork unter **Actions → Kiwi-style Iceraven APK (preview) → Run workflow** starten. Der Workflow ist vorbereitet, aber nicht in einer echten GitHub Actions-Ausführung überprüft.
+          +4. Das erzeugte Debug-APK ggf. aus den Workflow-Artefakten herunterladen. Die Debug-Signatur eignet sich ausschließlich zu privaten Tests; für eine produktive Veröffentlichung ist ein eigener sicher verwahrter Release-Key nötig.
+          +
+          +Alternativ aus der Konsole (Linux, Android SDK und Java gemäß Original-README):
+          +
+          +```bash
+          +git clone --recursive -b iceraven https://github.com/fork-maintainers/iceraven-browser.git
+          +cd iceraven-browser
+          +git apply --check ../Iceraven-Kiwi-Erweiterungen.patch
+          +git apply ../Iceraven-Kiwi-Erweiterungen.patch
+          +./automation/iceraven/install-sdk.sh
+          +./automation/iceraven/patch_android_components.sh
+          +./automation/iceraven/setup_venv.sh
+          +./gradlew app:assembleForkDebug --stacktrace
+          +```
+          +
+          +**Hinweis:** Auf GitHub sollte idealerweise der exakt gleiche Commit verwendet werden wie für den bereitgestellten ZIP-Export. Falls der Zweig seitdem weiterentwickelt wurde, kann der Patch Konflikte melden; dann muss er an den neuen Code angepasst werden.
+          +
+          +## Warum keine APK hier?
+          +
+          +Das Archiv hat über 4.000 Dateien, aber das referenzierte `android-components`-Git-Submodul ist im ZIP leer. Zudem fehlen in dieser Laufzeit Android SDK und Gradle 9.8.1; der Gradle-Download scheitert hier an fehlendem Netzwerkkontakt. Deshalb konnte die **Gesamt-App nicht kompiliert** werden.
+          +
+          +## Sicherheit und Rechte
+          +
+          +Dies ist kein abschließender Sicherheits-Audit. Das Original enthält eine Netzwerkfreigabe für HTTP-Sites (`usesCleartextTraffic` und `network_security_config.xml`), die bei einem Browser funktionale Gründe haben kann. Diese Konfiguration wurde ohne umfassende Prüfung nicht entfernt. Ebenso wurden Schutz-Flags im Privatmodus nicht angefasst. Vor ernsthaftem Einsatz sind aktuelle GeckoView-Sicherheitsupdates, Regressionstests und ein signierter Release erforderlich.
+          +
+          +Die ursprünglichen Lizenzhinweise bleiben erhalten. Der Großteil des Projekts unterliegt der Mozilla Public License 2.0 (MPL-2.0). Neue Kotlin-Dateien enthalten entsprechende Lizenzheader; Dritt-Abhängigkeiten können eigene Lizenzen haben.
+          diff --git a/kiwi-tools/audit.py b/kiwi-tools/audit.py
+          new file mode 100644
+          index 0000000..071d2a3
+          --- /dev/null
+          +++ b/kiwi-tools/audit.py
+          @@ -0,0 +1,115 @@
+          +#!/usr/bin/env python3
+          +"""Conservative static audit for the Kiwi display extension in an Iceraven source tree.
+          +
+          +This is not an Android/Kotlin/Gradle compile and is not a security audit.
+          +"""
+          +from __future__ import annotations
+          +import json
+          +import sys
+          +from pathlib import Path
+          +import xml.etree.ElementTree as ET
+          +
+          +ROOT = Path(__file__).resolve().parents[1]
+          +PREFS = ROOT / 'app/src/main/res/xml/customization_preferences.xml'
+          +EN = ROOT / 'app/src/main/res/values/kiwi_display.xml'
+          +DE = ROOT / 'app/src/main/res/values-de/kiwi_display.xml'
+          +CTRL = ROOT / 'app/src/main/java/org/mozilla/fenix/settings/KiwiDisplayController.kt'
+          +UI = ROOT / 'app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt'
+          +HOME = ROOT / 'app/src/main/java/org/mozilla/fenix/HomeActivity.kt'
+          +UPDATER = ROOT / 'app/src/main/java/org/mozilla/fenix/settings/SharedPreferenceUpdater.kt'
+          +PREFIX = '{http://schemas.android.com/apk/res/android}'
+          +
+          +
+          +def collect_resources(path: Path) -> dict[str, tuple[str, ...]]:
+          +    res = {}
+          +    for item in ET.parse(path).getroot():
+          +        name = item.get('name')
+          +        if name in res:
+          +            raise AssertionError(f'duplicate {name!r} in {path}')
+          +        res[name] = (item.tag, *[x.text or '' for x in item.findall('item')])
+          +    return res
+          +
+          +
+          +def audit():
+          +    problems = []
+          +    source = CTRL.read_text()
+          +    ui = UI.read_text()
+          +    home = HOME.read_text()
+          +    en = collect_resources(EN)
+          +    de = collect_resources(DE)
+          +    prefs = ET.parse(PREFS)
+          +    controls = {}
+          +    for item in prefs.iter():
+          +        key = item.get(PREFIX + 'key')
+          +        if key and key.startswith('kiwi_'):
+          +            if key in controls:
+          +                problems.append(f'duplicate preference key: {key}')
+          +            controls[key] = item
+          +    expected_bindings = {
+          +        'kiwi_display_keep_awake': 'KEEP_AWAKE_KEY',
+          +        'kiwi_display_orientation': 'ORIENTATION_KEY',
+          +        'kiwi_display_brightness': 'BRIGHTNESS_KEY',
+          +    }
+          +    expected = set(expected_bindings)
+          +    if expected - set(controls):
+          +        problems.append('missing control keys: ' + str(sorted(expected - set(controls))))
+          +    if set(en) != set(de):
+          +        problems.append('German/English resource keys differ')
+          +    for name, (tag, *values) in en.items():
+          +        if de.get(name, (None,))[0] != tag:
+          +            problems.append('Resource type differs: ' + name)
+          +        if tag == 'string-array' and len(de[name]) != len(en[name]):
+          +            problems.append('Resource array length differs: ' + name)
+          +    for value_key in ('kiwi_orientation_values', 'kiwi_brightness_values'):
+          +        if de[value_key] != en[value_key]:
+          +            problems.append('Localized machine values must remain identical: ' + value_key)
+          +    for item in controls.values():
+          +        for attr in ('title','summary','entries','entryValues'):
+          +            value = item.get(PREFIX + attr)
+          +            if value and value.startswith('@') and value[1:].split('/')[1] not in en:
+          +                problems.append(f'Unresolved Kiwi string/array resource: {value}')
+          +    for key, binding in expected_bindings.items():
+          +        if f'"{key}"' not in source:
+          +            problems.append(f'{key}: missing controller constant')
+          +        if f'KiwiDisplayController.{binding}' not in ui:
+          +            problems.append(f'{key}: missing UI preference binding')
+          +    if ui.count('applyKiwiDisplayControls()') < 3:
+          +        problems.append('expected all three preferences to apply immediately')
+          +    for entry_key, value_key in (
+          +        ('kiwi_orientation_entries', 'kiwi_orientation_values'),
+          +        ('kiwi_brightness_entries', 'kiwi_brightness_values'),
+          +    ):
+          +        if len(en[entry_key]) != len(en[value_key]):
+          +            problems.append(f'{entry_key} has a different number of labels and values')
+          +    if 'setupKiwiDisplayControls()' not in ui or 'applyKiwiDisplayControls()' not in home:
+          +        problems.append('new controls are not linked to app runtime')
+          +    if 'kiwiDisplayController.release()' not in home:
+          +        problems.append('window flag cleanup missing')
+          +    if 'Logger(' in UPDATER.read_text():
+          +        problems.append('preference updater still logs value through Logger')
+          +    if (ROOT / 'android-components').is_dir() and any((ROOT / 'android-components').iterdir()):
+          +        ac = 'present'
+          +    else:
+          +        ac = 'absent (Git submodule not included by GitHub ZIP)'
+          +    # Try parsing resource XML; count errors but do not mutate or remove unsupported files.
+          +    broken = []
+          +    xmls = list((ROOT / 'app/src/main/res').rglob('*.xml'))
+          +    for file in xmls:
+          +        try:
+          +            ET.parse(file)
+          +        except ET.ParseError as e:
+          +            broken.append(f'{file.relative_to(ROOT)}: {e}')
+          +    problems.extend(broken[:10])
+          +    report = {
+          +        'checked_xml_files': len(xmls),
+          +        'new_preference_keys': sorted(expected),
+          +        'locale_resource_keys': len(en),
+          +        'android_components_submodule': ac,
+          +        'errors': problems,
+          +        'limitations': 'Static XML and source integration checks only; not Kotlin/Gradle compilation',
+          +    }
+          +    print(json.dumps(report, ensure_ascii=False, indent=2))
+          +    return 1 if problems else 0
+          +
+          +if __name__ == '__main__':
+          +    sys.exit(audit())
+          diff --git a/kiwi-tools/tests/ControllerSmoke.kt b/kiwi-tools/tests/ControllerSmoke.kt
+          new file mode 100644
+          index 0000000..3476ed9
+          --- /dev/null
+          +++ b/kiwi-tools/tests/ControllerSmoke.kt
+          @@ -0,0 +1,54 @@
+          +package org.mozilla.fenix.settings
+          +
+          +import android.app.Activity
+          +import android.content.SharedPreferences
+          +import android.content.pm.ActivityInfo
+          +import android.view.WindowManager
+          +
+          +class FakePrefs : SharedPreferences {
+          +    val values = mutableMapOf<String, Any>()
+          +    override fun getBoolean(key: String, defaultValue: Boolean) = values[key] as? Boolean ?: defaultValue
+          +    override fun getString(key: String, defaultValue: String?) = values[key] as? String ?: defaultValue
+          +}
+          +
+          +fun main() {
+          +    val prefs = FakePrefs()
+          +    val activity = Activity()
+          +    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT // onboarding owns this
+          +    activity.window.attributes.screenBrightness = 0.83f
+          +    val controller = KiwiDisplayController(activity, prefs)
+          +
+          +    controller.apply()
+          +    check(activity.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+          +    check(activity.window.flags == 0)
+          +    check(activity.window.attributes.screenBrightness == 0.83f)
+          +
+          +    prefs.values[KiwiDisplayController.KEEP_AWAKE_KEY] = true
+          +    prefs.values[KiwiDisplayController.ORIENTATION_KEY] = "landscape"
+          +    prefs.values[KiwiDisplayController.BRIGHTNESS_KEY] = "25"
+          +    controller.apply()
+          +    check(activity.window.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0)
+          +    check(activity.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
+          +    check(activity.window.attributes.screenBrightness == 0.25f)
+          +
+          +    prefs.values[KiwiDisplayController.ORIENTATION_KEY] = "system"
+          +    prefs.values[KiwiDisplayController.BRIGHTNESS_KEY] = "system"
+          +    prefs.values[KiwiDisplayController.KEEP_AWAKE_KEY] = false
+          +    controller.apply()
+          +    check(activity.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+          +    check(activity.window.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON == 0)
+          +    check(activity.window.attributes.screenBrightness == 0.83f)
+          +
+          +    prefs.values[KiwiDisplayController.KEEP_AWAKE_KEY] = true
+          +    prefs.values[KiwiDisplayController.BRIGHTNESS_KEY] = "50"
+          +    controller.apply()
+          +    controller.release()
+          +    check(activity.window.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON == 0)
+          +    check(activity.window.attributes.screenBrightness == 0.83f)
+          +
+          +    check(KiwiDisplayController.validOrientation("bad") == "system")
+          +    check(KiwiDisplayController.validBrightness("200") == "system")
+          +    check(KiwiDisplayController.brightnessFraction("garbage") == null)
+          +    check(KiwiDisplayController.brightnessFraction("100") == 1f)
+          +    println("PASS: 15 Kotlin controller checks using Android test stubs (not an APK build)")
+          +}
+          diff --git a/kiwi-tools/tests/StubAndroid.kt b/kiwi-tools/tests/StubAndroid.kt
+          new file mode 100644
+          index 0000000..fd1213f
+          --- /dev/null
+          +++ b/kiwi-tools/tests/StubAndroid.kt
+          @@ -0,0 +1,13 @@
+          +package android.app
+          +
+          +open class Activity {
+          +    val window = Window()
+          +    var requestedOrientation: Int = -1
+          +}
+          +class Window {
+          +    var attributes = WindowAttributes()
+          +    var flags: Int = 0
+          +    fun addFlags(flag: Int) { flags = flags or flag }
+          +    fun clearFlags(flag: Int) { flags = flags and flag.inv() }
+          +}
+          +class WindowAttributes { var screenBrightness: Float = -1f }
+          diff --git a/kiwi-tools/tests/StubAndroidInfo.kt b/kiwi-tools/tests/StubAndroidInfo.kt
+          new file mode 100644
+          index 0000000..2563066
+          --- /dev/null
+          +++ b/kiwi-tools/tests/StubAndroidInfo.kt
+          @@ -0,0 +1,6 @@
+          +package android.content.pm
+          +object ActivityInfo {
+          +    const val SCREEN_ORIENTATION_PORTRAIT = 1
+          +    const val SCREEN_ORIENTATION_LANDSCAPE = 0
+          +    const val SCREEN_ORIENTATION_UNSPECIFIED = -1
+          +}
+          diff --git a/kiwi-tools/tests/StubPrefs.kt b/kiwi-tools/tests/StubPrefs.kt
+          new file mode 100644
+          index 0000000..098b694
+          --- /dev/null
+          +++ b/kiwi-tools/tests/StubPrefs.kt
+          @@ -0,0 +1,6 @@
+          +package android.content
+          +
+          +interface SharedPreferences {
+          +    fun getBoolean(key: String, defaultValue: Boolean): Boolean
+          +    fun getString(key: String, defaultValue: String?): String?
+          +}
+          diff --git a/kiwi-tools/tests/StubWindowManager.kt b/kiwi-tools/tests/StubWindowManager.kt
+          new file mode 100644
+          index 0000000..b537812
+          --- /dev/null
+          +++ b/kiwi-tools/tests/StubWindowManager.kt
+          @@ -0,0 +1,6 @@
+          +package android.view
+          +object WindowManager {
+          +    object LayoutParams {
+          +        const val FLAG_KEEP_SCREEN_ON = 128
+          +    }
+          +}
+          diff --git a/kiwi-tools/tests/run_controller_smoke.sh b/kiwi-tools/tests/run_controller_smoke.sh
+          new file mode 100644
+          index 0000000..17ff58e
+          --- /dev/null
+          +++ b/kiwi-tools/tests/run_controller_smoke.sh
+          @@ -0,0 +1,14 @@
+          +#!/usr/bin/env bash
+          +set -euo pipefail
+          +cd "$(dirname "$0")/../.."
+          +tmpdir="$(mktemp -d)"
+          +trap 'rm -rf "$tmpdir"' EXIT
+          +kotlinc \
+          +  kiwi-tools/tests/StubAndroid.kt \
+          +  kiwi-tools/tests/StubAndroidInfo.kt \
+          +  kiwi-tools/tests/StubWindowManager.kt \
+          +  kiwi-tools/tests/StubPrefs.kt \
+          +  kiwi-tools/tests/ControllerSmoke.kt \
+          +  app/src/main/java/org/mozilla/fenix/settings/KiwiDisplayController.kt \
+          +  -include-runtime -d "$tmpdir/kiwi-checks.jar"
+          +java -jar "$tmpdir/kiwi-checks.jar"
+          KIWI_DISPLAY_PATCH
+          git apply --check "$RUNNER_TEMP/kiwi-display.patch"
+          git apply "$RUNNER_TEMP/kiwi-display.patch"
+          echo "Kiwi-inspired settings patch applied successfully"
+
+      - name: Apply Kiwi-style navigation and OLED v0.2.1 changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/kiwi-ui-v021.patch" <<'KIWI_UI_02_PATCH'
+          diff --git a/app/src/main/java/org/mozilla/fenix/FenixApplication.kt b/app/src/main/java/org/mozilla/fenix/FenixApplication.kt
+          index d036d10..47f11f9 100644
+          --- a/app/src/main/java/org/mozilla/fenix/FenixApplication.kt
+          +++ b/app/src/main/java/org/mozilla/fenix/FenixApplication.kt
+          @@ -1384,10 +1384,10 @@ open class FenixApplication : Application(), Provider, ThemeProvider {
+           
+               @Composable
+               override fun provideTheme(): Theme {
+          -        return if (components.appStore.state.mode.isPrivate) {
+          -            Private
+          -        } else {
+          -            DefaultThemeProvider.provideTheme()
+          +        return when {
+          +            components.appStore.state.mode.isPrivate -> Private
+          +            components.settings.shouldUseOledTheme -> Theme.Oled
+          +            else -> DefaultThemeProvider.provideTheme()
+                   }
+               }
+           
+          diff --git a/app/src/main/java/org/mozilla/fenix/home/HomeFragment.kt b/app/src/main/java/org/mozilla/fenix/home/HomeFragment.kt
+          index b912da9..196924a 100644
+          --- a/app/src/main/java/org/mozilla/fenix/home/HomeFragment.kt
+          +++ b/app/src/main/java/org/mozilla/fenix/home/HomeFragment.kt
+          @@ -736,11 +736,12 @@ class HomeFragment : Fragment(), UserInteractionHandler, OnLongPressedListener {
+                                           !universalEdgeToEdge
+                                       }
+                               ) {
+          -                        if (!isPrivateMode) {
+          +                        // In OLED mode, do not draw a wallpaper over the true-black home background.
+          +                        if (!isPrivateMode && !settings.shouldUseOledTheme) {
+                                       WallpaperBackground(currentWallpaper)
+                                   }
+           
+          -                        if (showToolbarScrim) {
+          +                        if (showToolbarScrim && !settings.shouldUseOledTheme) {
+                                       WallpaperToolbarScrim(
+                                           topContentHeight = topBarHeight,
+                                           bottomContentHeight = bottomBarHeight,
+          @@ -771,7 +772,12 @@ class HomeFragment : Fragment(), UserInteractionHandler, OnLongPressedListener {
+                                               modifier = Modifier.onSizeChanged { bottomBarHeight = it.height },
+                                           )
+                                       },
+          -                            containerColor = Color.Transparent,
+          +                            // Preserve original transparency except in true-black OLED mode.
+          +                            containerColor = if (settings.shouldUseOledTheme && !isPrivateMode) {
+          +                                Color.Black
+          +                            } else {
+          +                                Color.Transparent
+          +                            },
+                                   ) { innerPadding ->
+                                       HomeContent(
+                                           appState = appState.value,
+          diff --git a/app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt b/app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt
+          index cb3fa84..2b3b13f 100644
+          --- a/app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt
+          +++ b/app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt
+          @@ -38,6 +38,7 @@ import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
+           import org.mozilla.fenix.ext.components
+           import org.mozilla.fenix.ext.isTallWindow
+           import org.mozilla.fenix.ext.isWideWindow
+          +import org.mozilla.fenix.ext.openInNewTab
+           import org.mozilla.fenix.ext.requireComponents
+           import org.mozilla.fenix.ext.showToolbar
+           import org.mozilla.fenix.settings.settingssearch.PreferenceFileInformation.CustomizationPreferences
+          @@ -138,6 +139,7 @@ class CustomizationFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFrag
+                   setupSystemBehaviorCategory()
+                   setupOtherCustomizationCategory()
+                   setupKiwiDisplayControls()
+          +        setupKiwiWebsiteDarkMode()
+               }
+           
+               private fun updateToolbarShortcut() {
+          @@ -254,17 +256,16 @@ class CustomizationFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFrag
+                   radioDarkTheme = requirePreference(R.string.pref_key_dark_theme)
+                   radioDarkTheme.onClickListener {
+                       AppTheme.darkThemeSelected.record(AppTheme.DarkThemeSelectedExtra("SETTINGS"))
+          -            setNewTheme(AppCompatDelegate.MODE_NIGHT_YES)
+          +            setNewTheme(AppCompatDelegate.MODE_NIGHT_YES, forceRecreate = true)
+                   }
+               }
+           
+               private fun bindDarkestTheme() {
+          -        val settings = requireComponents.settings
+                   radioDarkestTheme = requirePreference(R.string.pref_key_oled_theme)
+          -        radioDarkestTheme.isVisible = settings.enableOledTheme
+          +        radioDarkestTheme.isVisible = true
+                   radioDarkestTheme.onClickListener {
+                       AppTheme.oledThemeSelected.record(AppTheme.OledThemeSelectedExtra("SETTINGS"))
+          -            setNewTheme(AppCompatDelegate.MODE_NIGHT_YES)
+          +            setNewTheme(AppCompatDelegate.MODE_NIGHT_YES, forceRecreate = true)
+                   }
+               }
+           
+          @@ -277,9 +278,10 @@ class CustomizationFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFrag
+                   }
+               }
+           
+          -    private fun setNewTheme(mode: Int) {
+          -        if (AppCompatDelegate.getDefaultNightMode() == mode) return
+          -        AppCompatDelegate.setDefaultNightMode(mode)
+          +    private fun setNewTheme(mode: Int, forceRecreate: Boolean = false) {
+          +        val modeChanged = AppCompatDelegate.getDefaultNightMode() != mode
+          +        if (!modeChanged && !forceRecreate) return
+          +        if (modeChanged) AppCompatDelegate.setDefaultNightMode(mode)
+                   activity?.recreate()
+                   with(requireComponents.core) {
+                       engine.settings.preferredColorScheme = getPreferredColorScheme()
+          @@ -443,6 +445,15 @@ class CustomizationFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFrag
+                   }
+               }
+           
+          +    /** Web pages are handled separately from the browser chrome. A verified Android addon
+          +     * can darken bright pages without inverting images or breaking the native UI. */
+          +    private fun setupKiwiWebsiteDarkMode() {
+          +        findPreference<Preference>("kiwi_websites_dark_mode")?.setOnPreferenceClickListener {
+          +            openInNewTab("https://addons.mozilla.org/android/addon/darkreader/")
+          +            true
+          +        }
+          +    }
+          +
+               /** Iceraven's own preference store; intentionally not Android's default preference file. */
+               private fun setupKiwiDisplayControls() {
+                   val stored = requireComponents.settings.preferences
+          diff --git a/app/src/main/java/org/mozilla/fenix/settings/SettingsFragment.kt b/app/src/main/java/org/mozilla/fenix/settings/SettingsFragment.kt
+          index 27584e3..fc04b00 100644
+          --- a/app/src/main/java/org/mozilla/fenix/settings/SettingsFragment.kt
+          +++ b/app/src/main/java/org/mozilla/fenix/settings/SettingsFragment.kt
+          @@ -203,6 +203,12 @@ class SettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFragment
+                       }
+                   }
+           
+          +        // Kiwi-style fast access to the appearance and OLED settings.
+          +        findPreference<Preference>("kiwi_theme_shortcut")?.setOnPreferenceClickListener {
+          +            findNavController().navigate(R.id.action_settingsFragment_to_customizationFragment)
+          +            true
+          +        }
+          +
+                   findPreference<Preference>(getPreferenceKey(R.string.pref_key_translation))?.isVisible =
+                       FxNimbus.features.translations.value().globalSettingsEnabled &&
+                           components.core.store.state.translationEngine.isEngineSupported == true
+          diff --git a/app/src/main/java/org/mozilla/fenix/theme/ThemeManager.kt b/app/src/main/java/org/mozilla/fenix/theme/ThemeManager.kt
+          index 904191f..65766b2 100644
+          --- a/app/src/main/java/org/mozilla/fenix/theme/ThemeManager.kt
+          +++ b/app/src/main/java/org/mozilla/fenix/theme/ThemeManager.kt
+          @@ -23,6 +23,7 @@ import mozilla.components.support.ktx.android.view.createWindowInsetsController
+           import mozilla.components.support.ktx.android.view.setNavigationBarColorCompat
+           import mozilla.components.support.ktx.android.view.setStatusBarColorCompat
+           import org.mozilla.fenix.HomeActivity
+          +import org.mozilla.fenix.ext.components
+           import org.mozilla.fenix.R
+           import org.mozilla.fenix.browser.browsingmode.BrowsingMode
+           import org.mozilla.fenix.customtabs.ExternalAppBrowserActivity
+          @@ -71,7 +72,13 @@ abstract class ThemeManager {
+               }
+           
+               fun setActivityTheme(activity: Activity) {
+          -        activity.setTheme(currentThemeResource)
+          +        // Only affect regular browsing; private mode keeps its dedicated privacy theme.
+          +        val style = if (currentTheme == BrowsingMode.Normal && activity.components.settings.shouldUseOledTheme) {
+          +            R.style.KiwiOledTheme
+          +        } else {
+          +            currentThemeResource
+          +        }
+          +        activity.setTheme(style)
+               }
+           
+               companion object {
+          diff --git a/app/src/main/res/values-de/kiwi_ui_02.xml b/app/src/main/res/values-de/kiwi_ui_02.xml
+          new file mode 100644
+          index 0000000..17345e3
+          --- /dev/null
+          +++ b/app/src/main/res/values-de/kiwi_ui_02.xml
+          @@ -0,0 +1,23 @@
+          +<?xml version='1.0' encoding='utf-8'?>
+          +<resources>
+          +  <string name="kiwi_category_themes">Design &amp; Schwarzmodus</string>
+          +  <string name="kiwi_category_navigation">Browser &amp; Navigation</string>
+          +  <string name="kiwi_category_appearance">Darstellung, Sprache &amp; Bedienung</string>
+          +  <string name="kiwi_category_passwords">Passwörter &amp; Daten</string>
+          +  <string name="kiwi_category_addons">Erweiterungen</string>
+          +  <string name="kiwi_category_links">Downloads &amp; Links</string>
+          +  <string name="kiwi_category_developer">Experimente &amp; Entwickleroptionen</string>
+          +  <string name="kiwi_category_performance">Speicher &amp; System</string>
+          +  <string name="kiwi_category_misc">Weitere Optionen</string>
+          +  <string name="kiwi_quick_theme_title">Schwarzmodus &amp; Erscheinungsbild</string>
+          +  <string name="kiwi_quick_theme_summary">OLED, Toolbar, Gesten und Webseiten-Darstellung</string>
+          +  <string name="kiwi_websites_dark_mode_title">Webseiten: dunklen Modus einrichten</string>
+          +  <string name="kiwi_websites_dark_mode_summary">Dark Reader öffnen; für OLED den Hintergrund auf #000000 setzen</string>
+          +  <string name="kiwi_addons_account">Add-on-Konto-ID</string>
+          +  <string name="kiwi_addons_collection">Add-on-Sammlungsname</string>
+          +  <string name="kiwi_memory_suspend">Tabs bei Speichermangel auslagern</string>
+          +  <string name="kiwi_fullscreen_toast">Vollbild-Hinweis anzeigen</string>
+          +  <string name="kiwi_signin_button">Anmelden-Schaltfläche anzeigen</string>
+          +  <string name="kiwi_fission_title">Website-Isolation (Fission)</string>
+          +  <string name="kiwi_darkest_theme">OLED-Schwarz (Tiefschwarz)</string>
+          +</resources>
+          diff --git a/app/src/main/res/values/kiwi_ui_02.xml b/app/src/main/res/values/kiwi_ui_02.xml
+          new file mode 100644
+          index 0000000..5c4a1a2
+          --- /dev/null
+          +++ b/app/src/main/res/values/kiwi_ui_02.xml
+          @@ -0,0 +1,23 @@
+          +<?xml version='1.0' encoding='utf-8'?>
+          +<resources>
+          +  <string name="kiwi_category_themes">Appearance &amp; OLED black</string>
+          +  <string name="kiwi_category_navigation">Browser &amp; navigation</string>
+          +  <string name="kiwi_category_appearance">Appearance, language &amp; controls</string>
+          +  <string name="kiwi_category_passwords">Passwords &amp; data</string>
+          +  <string name="kiwi_category_addons">Extensions</string>
+          +  <string name="kiwi_category_links">Downloads &amp; links</string>
+          +  <string name="kiwi_category_developer">Experiments &amp; developer tools</string>
+          +  <string name="kiwi_category_performance">Memory &amp; system</string>
+          +  <string name="kiwi_category_misc">Other options</string>
+          +  <string name="kiwi_quick_theme_title">OLED black &amp; appearance</string>
+          +  <string name="kiwi_quick_theme_summary">OLED, toolbar, gestures and web appearance</string>
+          +  <string name="kiwi_websites_dark_mode_title">Websites: configure dark mode</string>
+          +  <string name="kiwi_websites_dark_mode_summary">Open Dark Reader; set its background to #000000 for OLED black</string>
+          +  <string name="kiwi_addons_account">Add-on account ID</string>
+          +  <string name="kiwi_addons_collection">Add-on collection name</string>
+          +  <string name="kiwi_memory_suspend">Suspend tabs under memory pressure</string>
+          +  <string name="kiwi_fullscreen_toast">Show fullscreen notice</string>
+          +  <string name="kiwi_signin_button">Show sign-in button</string>
+          +  <string name="kiwi_fission_title">Website isolation (Fission)</string>
+          +  <string name="kiwi_darkest_theme">OLED black (true black)</string>
+          +</resources>
+          diff --git a/app/src/main/res/values/styles.xml b/app/src/main/res/values/styles.xml
+          index 40cb3b3..3d5fe89 100644
+          --- a/app/src/main/res/values/styles.xml
+          +++ b/app/src/main/res/values/styles.xml
+          @@ -189,6 +189,24 @@
+           
+               <style name="NormalTheme" parent="NormalThemeBase" />
+           
+          +    <!-- Kiwi-style OLED surface: normal-theme attributes switch to true black. -->
+          +    <style name="KiwiOledTheme" parent="NormalTheme">
+          +        <item name="android:windowBackground">@android:color/black</item>
+          +        <item name="android:colorBackground">@android:color/black</item>
+          +        <item name="colorSurface">@android:color/black</item>
+          +        <item name="colorSurfaceVariant">#080808</item>
+          +        <item name="colorSurfaceContainer">@android:color/black</item>
+          +        <item name="colorSurfaceContainerLow">@android:color/black</item>
+          +        <item name="colorSurfaceContainerLowest">@android:color/black</item>
+          +        <item name="colorSurfaceContainerHigh">#0A0A0A</item>
+          +        <item name="colorSurfaceContainerHighest">#101010</item>
+          +        <item name="colorSurfaceDim">@android:color/black</item>
+          +        <item name="android:statusBarColor">@android:color/black</item>
+          +        <item name="android:navigationBarColor">@android:color/black</item>
+          +        <item name="android:windowLightStatusBar">false</item>
+          +    </style>
+          +
+          +
+               <style name="BaseDialogStyle.Private" parent="BaseDialogStyle">
+                   <item name="alertDialogStyle">@style/MaterialAlertDialog.App.Private</item>
+                   <item name="materialAlertDialogTitleTextStyle">@style/MaterialAlertDialog.App.Title.Text.Private</item>
+          diff --git a/app/src/main/res/xml/customization_preferences.xml b/app/src/main/res/xml/customization_preferences.xml
+          index 105bf44..4dff59a 100644
+          --- a/app/src/main/res/xml/customization_preferences.xml
+          +++ b/app/src/main/res/xml/customization_preferences.xml
+          @@ -1,223 +1,78 @@
+          -<?xml version="1.0" encoding="utf-8"?>
+          +<?xml version='1.0' encoding='UTF-8'?>
+           <!-- This Source Code Form is subject to the terms of the Mozilla Public
+              - License, v. 2.0. If a copy of the MPL was not distributed with this
+              - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+          -<androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+          -    xmlns:app="http://schemas.android.com/apk/res-auto"
+          -    android:key="@string/pref_key_customization_preference_screen" >
+          -    <androidx.preference.PreferenceCategory
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_app_icon"
+          -        android:key="@string/pref_key_customization_category_app_icon"
+          -        app:allowDividerBelow="false"
+          -        app:iconSpaceReserved="false">
+          -        <org.mozilla.fenix.iconpicker.ui.AppIconPreference
+          -            android:key="@string/pref_key_app_icon" />
+          +<androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto" android:key="@string/pref_key_customization_preference_screen">
+          +    <androidx.preference.PreferenceCategory android:layout="@layout/preference_cat_style" android:title="@string/kiwi_category_themes" app:iconSpaceReserved="false">
+          +        <org.mozilla.fenix.settings.RadioButtonPreference android:defaultValue="@bool/underAPI28" android:key="@string/pref_key_light_theme" android:title="@string/preference_light_theme"/>
+          +
+          +        <org.mozilla.fenix.settings.RadioButtonPreference android:defaultValue="false" android:key="@string/pref_key_dark_theme" android:title="@string/preference_dark_theme"/>
+          +
+          +        <org.mozilla.fenix.settings.RadioButtonPreference android:defaultValue="false" android:key="@string/pref_key_oled_theme" android:title="@string/kiwi_darkest_theme"/>
+          +
+          +        <androidx.preference.Preference android:key="kiwi_websites_dark_mode" android:title="@string/kiwi_websites_dark_mode_title" android:summary="@string/kiwi_websites_dark_mode_summary" app:iconSpaceReserved="false"/><org.mozilla.fenix.settings.RadioButtonPreference android:defaultValue="false" android:key="@string/pref_key_auto_battery_theme" android:title="@string/preference_auto_battery_theme" app:isPreferenceVisible="@bool/underAPI28"/>
+          +
+          +        <org.mozilla.fenix.settings.RadioButtonPreference android:defaultValue="@bool/API28" android:key="@string/pref_key_follow_device_theme" android:title="@string/preference_follow_device_theme" app:isPreferenceVisible="@bool/API28"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_theme"
+          -        app:iconSpaceReserved="false">
+          -        <org.mozilla.fenix.settings.RadioButtonPreference
+          -            android:defaultValue="@bool/underAPI28"
+          -            android:key="@string/pref_key_light_theme"
+          -            android:title="@string/preference_light_theme" />
+          -
+          -        <org.mozilla.fenix.settings.RadioButtonPreference
+          -            android:defaultValue="false"
+          -            android:key="@string/pref_key_dark_theme"
+          -            android:title="@string/preference_dark_theme" />
+          -
+          -        <org.mozilla.fenix.settings.RadioButtonPreference
+          -            android:defaultValue="false"
+          -            android:key="@string/pref_key_oled_theme"
+          -            android:title="@string/preference_oled_theme"
+          -            android:visible="false" />
+          -
+          -        <org.mozilla.fenix.settings.RadioButtonPreference
+          -            android:defaultValue="false"
+          -            android:key="@string/pref_key_auto_battery_theme"
+          -            android:title="@string/preference_auto_battery_theme"
+          -            app:isPreferenceVisible="@bool/underAPI28" />
+          -
+          -        <org.mozilla.fenix.settings.RadioButtonPreference
+          -            android:defaultValue="@bool/API28"
+          -            android:key="@string/pref_key_follow_device_theme"
+          -            android:title="@string/preference_follow_device_theme"
+          -            app:isPreferenceVisible="@bool/API28" />
+          +    <androidx.preference.PreferenceCategory android:key="kiwi_display_controls" android:layout="@layout/preference_cat_style" android:title="@string/kiwi_display_controls_title" app:iconSpaceReserved="false">
+          +        <androidx.preference.SwitchPreferenceCompat android:key="kiwi_display_keep_awake" android:defaultValue="false" android:persistent="false" android:summary="@string/kiwi_keep_awake_description" android:title="@string/kiwi_keep_awake_title"/>
+          +        <androidx.preference.ListPreference android:key="kiwi_display_orientation" android:defaultValue="system" android:persistent="false" android:entries="@array/kiwi_orientation_entries" android:entryValues="@array/kiwi_orientation_values" android:title="@string/kiwi_orientation_title" app:useSimpleSummaryProvider="true"/>
+          +        <androidx.preference.ListPreference android:key="kiwi_display_brightness" android:defaultValue="system" android:persistent="false" android:entries="@array/kiwi_brightness_entries" android:entryValues="@array/kiwi_brightness_values" android:title="@string/kiwi_brightness_title" app:useSimpleSummaryProvider="true"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_toolbar_2"
+          -        android:key="@string/pref_key_customization_category_toolbar"
+          -        app:iconSpaceReserved="false">
+          -        <org.mozilla.fenix.settings.RadioButtonPreference
+          -            android:key="@string/pref_key_toolbar_top"
+          -            android:title="@string/preference_top_toolbar" />
+          -        <org.mozilla.fenix.settings.RadioButtonPreference
+          -            android:key="@string/pref_key_toolbar_bottom"
+          -            android:title="@string/preference_bottom_toolbar" />
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:defaultValue="true"
+          -            android:key="@string/pref_key_strip_url"
+          -            android:summary="@string/preferences_strip_url_description"
+          -            android:title="@string/preferences_strip_url_title" />
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_suggest_shipped_domains"
+          -            android:title="@string/preferences_suggest_shipped_domains"/>
+          +    <androidx.preference.PreferenceCategory android:layout="@layout/preference_cat_style" android:title="@string/preferences_app_icon" android:key="@string/pref_key_customization_category_app_icon" app:allowDividerBelow="false" app:iconSpaceReserved="false">
+          +        <org.mozilla.fenix.iconpicker.ui.AppIconPreference android:key="@string/pref_key_app_icon"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_tab_strip"
+          -        app:iconSpaceReserved="false">
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_tab_strip_show"
+          -            android:title="@string/preference_tab_strip_show" />
+          +    <androidx.preference.PreferenceCategory android:layout="@layout/preference_cat_style" android:title="@string/preferences_toolbar_2" android:key="@string/pref_key_customization_category_toolbar" app:iconSpaceReserved="false">
+          +        <org.mozilla.fenix.settings.RadioButtonPreference android:key="@string/pref_key_toolbar_top" android:title="@string/preference_top_toolbar"/>
+          +        <org.mozilla.fenix.settings.RadioButtonPreference android:key="@string/pref_key_toolbar_bottom" android:title="@string/preference_bottom_toolbar"/>
+          +        <androidx.preference.SwitchPreferenceCompat android:defaultValue="true" android:key="@string/pref_key_strip_url" android:summary="@string/preferences_strip_url_description" android:title="@string/preferences_strip_url_title"/>
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_suggest_shipped_domains" android:title="@string/preferences_suggest_shipped_domains"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -      android:layout="@layout/preference_cat_style"
+          -      android:title="@string/preference_tab_strip_location_header"
+          -      android:key="@string/pref_key_tab_strip_location"
+          -      app:iconSpaceReserved="false">
+          -      <org.mozilla.fenix.settings.RadioButtonPreference
+          -        android:key="@string/pref_key_tab_bar_top"
+          -        android:title="@string/preference_top_tab_strip" />
+          -      <org.mozilla.fenix.settings.RadioButtonPreference
+          -        android:key="@string/pref_key_tab_bar_bottom"
+          -        android:title="@string/preference_bottom_tab_strip" />
+          +    <androidx.preference.PreferenceCategory android:layout="@layout/preference_cat_style" android:title="@string/preferences_tab_strip" app:iconSpaceReserved="false">
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_tab_strip_show" android:title="@string/preference_tab_strip_show"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_toolbar_layout"
+          -        android:key="@string/pref_key_customization_category_toolbar_layout"
+          -        android:visible="false"
+          -        app:iconSpaceReserved="false">
+          -        <org.mozilla.fenix.settings.ToggleRadioButtonPreference
+          -            android:key="@string/pref_key_toolbar_expanded"
+          -            app:sharedPreferenceKey="pref_key_toolbar_expanded"
+          -            app:falseOptionTitle="@string/preference_simple_toolbar"
+          -            app:trueOptionTitle="@string/preference_expanded_toolbar" />
+          +    <androidx.preference.PreferenceCategory android:layout="@layout/preference_cat_style" android:title="@string/preference_tab_strip_location_header" android:key="@string/pref_key_tab_strip_location" app:iconSpaceReserved="false">
+          +      <org.mozilla.fenix.settings.RadioButtonPreference android:key="@string/pref_key_tab_bar_top" android:title="@string/preference_top_tab_strip"/>
+          +      <org.mozilla.fenix.settings.RadioButtonPreference android:key="@string/pref_key_tab_bar_bottom" android:title="@string/preference_bottom_tab_strip"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <!-- Toolbar shortcut picker -->
+          -    <androidx.preference.PreferenceCategory
+          -        android:key="@string/pref_key_customization_category_toolbar_shortcut"
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_toolbar_shortcut"
+          -        app:iconSpaceReserved="false" />
+          -
+          -    <androidx.preference.PreferenceCategory
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_gestures"
+          -        app:iconSpaceReserved="false">
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_website_pull_to_refresh"
+          -            android:title="@string/preference_gestures_website_pull_to_refresh"
+          -            app:isPreferenceVisible="false" />
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_dynamic_toolbar"
+          -            android:title="@string/preference_gestures_dynamic_toolbar" />
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_swipe_toolbar_switch_tabs"
+          -            android:title="@string/preference_gestures_swipe_toolbar_switch_tabs_2" />
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_swipe_toolbar_show_tabs"
+          -            android:title="@string/preference_gestures_swipe_toolbar_show_tabs_2" />
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_shake_gesture_enabled"
+          -            android:title="@string/preferences_shake_to_summarize"
+          -            app:isPreferenceVisible="false" />
+          +    <androidx.preference.PreferenceCategory android:layout="@layout/preference_cat_style" android:title="@string/preferences_toolbar_layout" android:key="@string/pref_key_customization_category_toolbar_layout" android:visible="false" app:iconSpaceReserved="false">
+          +        <org.mozilla.fenix.settings.ToggleRadioButtonPreference android:key="@string/pref_key_toolbar_expanded" app:sharedPreferenceKey="pref_key_toolbar_expanded" app:falseOptionTitle="@string/preference_simple_toolbar" app:trueOptionTitle="@string/preference_expanded_toolbar"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/library_downloads"
+          -        app:iconSpaceReserved="false">
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_success_download_dialog"
+          -            android:title="@string/preferences_show_success_download_dialog"/>
+          +    <!-- Toolbar shortcut picker -->
+          +    <androidx.preference.PreferenceCategory android:key="@string/pref_key_customization_category_toolbar_shortcut" android:layout="@layout/preference_cat_style" android:title="@string/preferences_toolbar_shortcut" app:iconSpaceReserved="false"/>
+          +
+          +    <androidx.preference.PreferenceCategory android:layout="@layout/preference_cat_style" android:title="@string/preferences_gestures" app:iconSpaceReserved="false">
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_website_pull_to_refresh" android:title="@string/preference_gestures_website_pull_to_refresh" app:isPreferenceVisible="false"/>
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_dynamic_toolbar" android:title="@string/preference_gestures_dynamic_toolbar"/>
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_swipe_toolbar_switch_tabs" android:title="@string/preference_gestures_swipe_toolbar_switch_tabs_2"/>
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_swipe_toolbar_show_tabs" android:title="@string/preference_gestures_swipe_toolbar_show_tabs_2"/>
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_shake_gesture_enabled" android:title="@string/preferences_shake_to_summarize" app:isPreferenceVisible="false"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:key="@string/pref_key_addons_settings_category"
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_addons_customization"
+          -        app:allowDividerAbove="true"
+          -        app:iconSpaceReserved="false">
+          -        <androidx.preference.EditTextPreference
+          -            android:key="@string/pref_key_addons_custom_account"
+          -            android:title="@string/addons_custom_source_account"
+          -            app:useSimpleSummaryProvider="true" />
+          -        <androidx.preference.EditTextPreference
+          -            android:key="@string/pref_key_addons_custom_collection"
+          -            android:title="@string/addons_custom_source_collection"
+          -            app:useSimpleSummaryProvider="true" />
+          +    <androidx.preference.PreferenceCategory android:layout="@layout/preference_cat_style" android:title="@string/library_downloads" app:iconSpaceReserved="false">
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_success_download_dialog" android:title="@string/preferences_show_success_download_dialog"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:key="@string/pref_key_system_behavior_settings_category"
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_system_behavior"
+          -        app:allowDividerAbove="true"
+          -        app:iconSpaceReserved="false">
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:defaultValue="true"
+          -            android:key="@string/pref_key_relinquish_memory_under_pressure"
+          -            android:summary="@string/preferences_relinquish_memory_description"
+          -            android:title="@string/preferences_relinquish_memory_title" />
+          +    <androidx.preference.PreferenceCategory android:key="@string/pref_key_addons_settings_category" android:layout="@layout/preference_cat_style" android:title="@string/kiwi_category_addons" app:allowDividerAbove="true" app:iconSpaceReserved="false">
+          +        <androidx.preference.EditTextPreference android:key="@string/pref_key_addons_custom_account" android:title="@string/kiwi_addons_account" app:useSimpleSummaryProvider="true"/>
+          +        <androidx.preference.EditTextPreference android:key="@string/pref_key_addons_custom_collection" android:title="@string/kiwi_addons_collection" app:useSimpleSummaryProvider="true"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <!-- Optional, Kiwi-inspired display controls. Defaults preserve Iceraven behavior. -->
+          -    <androidx.preference.PreferenceCategory
+          -        android:key="kiwi_display_controls"
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/kiwi_display_controls_title"
+          -        app:iconSpaceReserved="false">
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="kiwi_display_keep_awake"
+          -            android:defaultValue="false"
+          -            android:persistent="false"
+          -            android:summary="@string/kiwi_keep_awake_description"
+          -            android:title="@string/kiwi_keep_awake_title" />
+          -        <androidx.preference.ListPreference
+          -            android:key="kiwi_display_orientation"
+          -            android:defaultValue="system"
+          -            android:persistent="false"
+          -            android:entries="@array/kiwi_orientation_entries"
+          -            android:entryValues="@array/kiwi_orientation_values"
+          -            android:title="@string/kiwi_orientation_title"
+          -            app:useSimpleSummaryProvider="true" />
+          -        <androidx.preference.ListPreference
+          -            android:key="kiwi_display_brightness"
+          -            android:defaultValue="system"
+          -            android:persistent="false"
+          -            android:entries="@array/kiwi_brightness_entries"
+          -            android:entryValues="@array/kiwi_brightness_values"
+          -            android:title="@string/kiwi_brightness_title"
+          -            app:useSimpleSummaryProvider="true" />
+          +    <androidx.preference.PreferenceCategory android:key="@string/pref_key_system_behavior_settings_category" android:layout="@layout/preference_cat_style" android:title="@string/kiwi_category_performance" app:allowDividerAbove="true" app:iconSpaceReserved="false">
+          +        <androidx.preference.SwitchPreferenceCompat android:defaultValue="true" android:key="@string/pref_key_relinquish_memory_under_pressure" android:summary="@string/preferences_relinquish_memory_description" android:title="@string/kiwi_memory_suspend"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:key="@string/pref_key_other_customization_category"
+          -        android:layout="@layout/preference_cat_style"
+          -        android:title="@string/preferences_other_customization"
+          -        app:allowDividerAbove="true"
+          -        app:iconSpaceReserved="false"
+          -        >
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_show_fullscreen_toast"
+          -            android:title="@string/preferences_show_fullscreen_toast" />
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_show_sign_in_button"
+          -            android:title="@string/preferences_show_sign_in_button" />
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_enable_fission"
+          -            android:summary="@string/preferences_enable_fission_description"
+          -            android:title="@string/preferences_enable_fission" />
+          +    <!-- Optional, Kiwi-inspired display controls. Defaults preserve Iceraven behavior. -->
+          +    <androidx.preference.PreferenceCategory android:key="@string/pref_key_other_customization_category" android:layout="@layout/preference_cat_style" android:title="@string/kiwi_category_misc" app:allowDividerAbove="true" app:iconSpaceReserved="false">
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_show_fullscreen_toast" android:title="@string/kiwi_fullscreen_toast"/>
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_show_sign_in_button" android:title="@string/kiwi_signin_button"/>
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_enable_fission" android:summary="@string/preferences_enable_fission_description" android:title="@string/kiwi_fission_title"/>
+               </androidx.preference.PreferenceCategory>
+           </androidx.preference.PreferenceScreen>
+          diff --git a/app/src/main/res/xml/preferences.xml b/app/src/main/res/xml/preferences.xml
+          index 7b82688..62ce3a4 100644
+          --- a/app/src/main/res/xml/preferences.xml
+          +++ b/app/src/main/res/xml/preferences.xml
+          @@ -1,259 +1,101 @@
+          -<?xml version="1.0" encoding="utf-8"?>
+          +<?xml version='1.0' encoding='UTF-8'?>
+           <!-- This Source Code Form is subject to the terms of the Mozilla Public
+              - License, v. 2.0. If a copy of the MPL was not distributed with this
+              - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+          +<androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
+           
+          -<androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+          -    xmlns:app="http://schemas.android.com/apk/res-auto">
+          -
+          -    <androidx.preference.Preference
+          -        android:key="@string/pref_key_sign_in"
+          -        android:layout="@layout/sign_in_preference"
+          -        android:summary="@string/preferences_sign_in_description"
+          -        android:title="@string/preferences_sign_in"
+          -        app:allowDividerBelow="false" />
+          -
+          -    <androidx.preference.PreferenceCategory
+          -        android:key="@string/pref_key_account_category"
+          -        android:title="@string/preferences_category_account"
+          -        app:isPreferenceVisible="false"
+          -        android:layout="@layout/preference_category_no_icon_style">
+          -
+          -        <org.mozilla.fenix.settings.account.AccountPreference
+          -            android:icon="@drawable/mozac_ic_avatar_circle_24"
+          -            android:key="@string/pref_key_account" />
+          -
+          -        <org.mozilla.fenix.settings.account.AccountAuthErrorPreference
+          -            android:icon="@drawable/ic_account_warning"
+          -            android:key="@string/pref_key_account_auth_error" />
+          +    <androidx.preference.Preference android:key="@string/pref_key_sign_in" android:layout="@layout/sign_in_preference" android:summary="@string/preferences_sign_in_description" android:title="@string/preferences_sign_in" app:allowDividerBelow="false"/>
+          +
+          +    <androidx.preference.PreferenceCategory android:key="@string/pref_key_account_category" android:title="@string/preferences_category_account" app:isPreferenceVisible="false" android:layout="@layout/preference_category_no_icon_style">
+          +
+          +        <org.mozilla.fenix.settings.account.AccountPreference android:icon="@drawable/mozac_ic_avatar_circle_24" android:key="@string/pref_key_account"/>
+          +
+          +        <org.mozilla.fenix.settings.account.AccountAuthErrorPreference android:icon="@drawable/ic_account_warning" android:key="@string/pref_key_account_auth_error"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.Preference
+          -        app:iconSpaceReserved="false"
+          -        android:key="@string/pref_key_sync_debug"
+          -        android:title="@string/preferences_sync_debug"
+          -        app:isPreferenceVisible="false" />
+          -
+          -    <androidx.preference.PreferenceCategory
+          -        android:title="@string/preferences_category_general"
+          -        android:layout="@layout/preference_category_no_icon_style">
+          -        <androidx.preference.Preference
+          -            app:iconSpaceReserved="false"
+          -            android:key="@string/pref_key_search_settings"
+          -            android:title="@string/preferences_search" />
+          -
+          -        <androidx.preference.Preference
+          -            app:iconSpaceReserved="false"
+          -            android:key="@string/pref_key_tabs"
+          -            android:title="@string/preferences_tabs" />
+          -
+          -        <androidx.preference.Preference
+          -            app:iconSpaceReserved="false"
+          -            android:key="@string/pref_key_home"
+          -            android:title="@string/preferences_home_2" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_customize"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_customize" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_passwords"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_passwords_logins_and_passwords_2" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_email_masks"
+          -            android:title="@string/preferences_email_masks"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="false" />
+          -
+          -        <androidx.preference.Preference
+          -            app:iconSpaceReserved="false"
+          -            android:key="@string/pref_key_credit_cards"
+          -            android:title="@string/preferences_credit_cards_2" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_accessibility"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_accessibility" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_language"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_language" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_translation"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="false"
+          -            android:title="@string/preferences_translations" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_page_summaries"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="false"
+          -            android:title="@string/preferences_page_summaries" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_ai_controls"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="false"
+          -            android:title="@string/preferences_ai_controls" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_import_bookmarks"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="false"
+          -            android:title="@string/preferences_import_bookmarks" />
+          -
+          -        <org.mozilla.fenix.settings.DefaultBrowserPreference
+          -            android:key="@string/pref_key_make_default_browser"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_set_as_default_browser" />
+          +    <androidx.preference.Preference app:iconSpaceReserved="false" android:key="@string/pref_key_sync_debug" android:title="@string/preferences_sync_debug" app:isPreferenceVisible="false"/>
+          +
+          +    <androidx.preference.PreferenceCategory android:title="@string/kiwi_category_navigation" android:layout="@layout/preference_category_no_icon_style">
+          +        <androidx.preference.Preference app:iconSpaceReserved="false" android:key="@string/pref_key_search_settings" android:title="@string/preferences_search"/>
+          +
+          +        <androidx.preference.Preference app:iconSpaceReserved="false" android:key="@string/pref_key_tabs" android:title="@string/preferences_tabs"/>
+          +
+          +        <androidx.preference.Preference app:iconSpaceReserved="false" android:key="@string/pref_key_home" android:title="@string/preferences_home_2"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_customize" app:iconSpaceReserved="false" android:title="@string/preferences_customize"/>
+          +
+          +        <androidx.preference.Preference android:key="kiwi_theme_shortcut" android:title="@string/kiwi_quick_theme_title" android:summary="@string/kiwi_quick_theme_summary" app:iconSpaceReserved="false"/><org.mozilla.fenix.settings.DefaultBrowserPreference android:key="@string/pref_key_make_default_browser" app:iconSpaceReserved="false" android:title="@string/preferences_set_as_default_browser"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <androidx.preference.PreferenceCategory
+          -        android:title="@string/preferences_category_privacy_security"
+          -        android:key="@string/pref_key_privacy_security_category"
+          -        android:layout="@layout/preference_category_no_icon_style">
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_private_browsing"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_private_browsing_options" />
+          -
+          -        <org.mozilla.fenix.settings.IPProtectionPreference
+          -            android:key="@string/pref_key_ip_protection_settings"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="false"
+          -            app:allowDividerAbove="false"/>
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_https_only_settings"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_https_only_title" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_doh_settings"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="false"
+          -            android:title="@string/preference_doh_title" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_tracking_protection_settings"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preference_enhanced_tracking_protection" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_site_permissions"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_site_settings" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_delete_browsing_data"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_delete_browsing_data" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_delete_browsing_data_on_quit_preference"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_delete_browsing_data_on_quit" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_notifications"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_notifications" />
+          +    <androidx.preference.PreferenceCategory android:title="@string/kiwi_category_appearance" android:layout="@layout/preference_category_no_icon_style" app:iconSpaceReserved="false"><androidx.preference.Preference android:key="@string/pref_key_accessibility" app:iconSpaceReserved="false" android:title="@string/preferences_accessibility"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_language" app:iconSpaceReserved="false" android:title="@string/preferences_language"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_translation" app:iconSpaceReserved="false" app:isPreferenceVisible="false" android:title="@string/preferences_translations"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_page_summaries" app:iconSpaceReserved="false" app:isPreferenceVisible="false" android:title="@string/preferences_page_summaries"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_ai_controls" app:iconSpaceReserved="false" app:isPreferenceVisible="false" android:title="@string/preferences_ai_controls"/>
+          +
+          +        </androidx.preference.PreferenceCategory><androidx.preference.PreferenceCategory android:title="@string/kiwi_category_passwords" android:layout="@layout/preference_category_no_icon_style" app:iconSpaceReserved="false"><androidx.preference.Preference android:key="@string/pref_key_passwords" app:iconSpaceReserved="false" android:title="@string/preferences_passwords_logins_and_passwords_2"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_email_masks" android:title="@string/preferences_email_masks" app:iconSpaceReserved="false" app:isPreferenceVisible="false"/>
+          +
+          +        <androidx.preference.Preference app:iconSpaceReserved="false" android:key="@string/pref_key_credit_cards" android:title="@string/preferences_credit_cards_2"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_import_bookmarks" app:iconSpaceReserved="false" app:isPreferenceVisible="false" android:title="@string/preferences_import_bookmarks"/>
+          +
+          +        </androidx.preference.PreferenceCategory><androidx.preference.PreferenceCategory android:title="@string/preferences_category_privacy_security" android:key="@string/pref_key_privacy_security_category" android:layout="@layout/preference_category_no_icon_style">
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_private_browsing" app:iconSpaceReserved="false" android:title="@string/preferences_private_browsing_options"/>
+          +
+          +        <org.mozilla.fenix.settings.IPProtectionPreference android:key="@string/pref_key_ip_protection_settings" app:iconSpaceReserved="false" app:isPreferenceVisible="false" app:allowDividerAbove="false"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_https_only_settings" app:iconSpaceReserved="false" android:title="@string/preferences_https_only_title"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_doh_settings" app:iconSpaceReserved="false" app:isPreferenceVisible="false" android:title="@string/preference_doh_title"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_tracking_protection_settings" app:iconSpaceReserved="false" android:title="@string/preference_enhanced_tracking_protection"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_site_permissions" app:iconSpaceReserved="false" android:title="@string/preferences_site_settings"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_delete_browsing_data" app:iconSpaceReserved="false" android:title="@string/preferences_delete_browsing_data"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_delete_browsing_data_on_quit_preference" app:iconSpaceReserved="false" android:title="@string/preferences_delete_browsing_data_on_quit"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_notifications" app:iconSpaceReserved="false" android:title="@string/preferences_notifications"/>
+               </androidx.preference.PreferenceCategory>
+           
+          -    <PreferenceCategory
+          -        android:title="@string/preferences_category_advanced"
+          -        android:key="@string/pref_key_advanced"
+          -        android:layout="@layout/preference_category_no_icon_style">
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_addons"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_extensions" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_install_local_addon"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="false"
+          -            android:title="@string/preferences_install_local_extension" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_override_amo_collection"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_customize_extension_collection" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_link_sharing"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_link_sharing" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_open_links_in_apps"
+          -            android:title="@string/preferences_open_links_in_apps"
+          -            app:iconSpaceReserved="false" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_downloads"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_downloads_2" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_firefox_labs"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/firefox_labs_title" />
+          -
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_leakcanary"
+          -            android:title="@string/preference_leakcanary"
+          -            app:iconSpaceReserved="false"
+          -            app:isPreferenceVisible="@bool/IS_DEBUG" />
+          -
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:key="@string/pref_key_remote_debugging"
+          -            android:title="@string/preferences_remote_debugging"
+          -            app:iconSpaceReserved="false"
+          -            android:defaultValue="false" />
+          -
+          -        <androidx.preference.SwitchPreferenceCompat
+          -            android:defaultValue="false"
+          -            android:key="@string/pref_key_enable_gecko_logs"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_enable_gecko_logs" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_local_network_access"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_local_network_access" />
+          -    </PreferenceCategory>
+          -
+          -    <androidx.preference.PreferenceCategory
+          -        android:title="@string/preferences_category_about"
+          -        app:iconSpaceReserved="false"
+          -        android:layout="@layout/preference_category_no_icon_style">
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_about"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_about" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_debug_settings"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_debug_settings"
+          -            app:isPreferenceVisible="false" />
+          -
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_nimbus_experiments"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_nimbus_experiments"
+          -            app:isPreferenceVisible="false" />
+          -        <androidx.preference.Preference
+          -            android:key="@string/pref_key_start_profiler"
+          -            app:iconSpaceReserved="false"
+          -            android:title="@string/preferences_start_profiler"
+          -            app:isPreferenceVisible="false" />
+          +    <PreferenceCategory android:title="@string/kiwi_category_addons" android:key="@string/pref_key_advanced" android:layout="@layout/preference_category_no_icon_style">
+          +        <androidx.preference.Preference android:key="@string/pref_key_addons" app:iconSpaceReserved="false" android:title="@string/preferences_extensions"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_install_local_addon" app:iconSpaceReserved="false" app:isPreferenceVisible="false" android:title="@string/preferences_install_local_extension"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_override_amo_collection" app:iconSpaceReserved="false" android:title="@string/preferences_customize_extension_collection"/>
+          +
+          +        </PreferenceCategory>
+          +
+          +    <androidx.preference.PreferenceCategory android:title="@string/kiwi_category_links" android:layout="@layout/preference_category_no_icon_style" app:iconSpaceReserved="false"><androidx.preference.Preference android:key="@string/pref_key_link_sharing" app:iconSpaceReserved="false" android:title="@string/preferences_link_sharing"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_open_links_in_apps" android:title="@string/preferences_open_links_in_apps" app:iconSpaceReserved="false"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_downloads" app:iconSpaceReserved="false" android:title="@string/preferences_downloads_2"/>
+          +
+          +        </androidx.preference.PreferenceCategory><androidx.preference.PreferenceCategory android:title="@string/kiwi_category_developer" android:layout="@layout/preference_category_no_icon_style" app:iconSpaceReserved="false"><androidx.preference.Preference android:key="@string/pref_key_firefox_labs" app:iconSpaceReserved="false" android:title="@string/firefox_labs_title"/>
+          +
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_leakcanary" android:title="@string/preference_leakcanary" app:iconSpaceReserved="false" app:isPreferenceVisible="@bool/IS_DEBUG"/>
+          +
+          +        <androidx.preference.SwitchPreferenceCompat android:key="@string/pref_key_remote_debugging" android:title="@string/preferences_remote_debugging" app:iconSpaceReserved="false" android:defaultValue="false"/>
+          +
+          +        <androidx.preference.SwitchPreferenceCompat android:defaultValue="false" android:key="@string/pref_key_enable_gecko_logs" app:iconSpaceReserved="false" android:title="@string/preferences_enable_gecko_logs"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_local_network_access" app:iconSpaceReserved="false" android:title="@string/preferences_local_network_access"/>
+          +    </androidx.preference.PreferenceCategory><androidx.preference.PreferenceCategory android:title="@string/preferences_category_about" app:iconSpaceReserved="false" android:layout="@layout/preference_category_no_icon_style">
+          +        <androidx.preference.Preference android:key="@string/pref_key_about" app:iconSpaceReserved="false" android:title="@string/preferences_about"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_debug_settings" app:iconSpaceReserved="false" android:title="@string/preferences_debug_settings" app:isPreferenceVisible="false"/>
+          +
+          +        <androidx.preference.Preference android:key="@string/pref_key_nimbus_experiments" app:iconSpaceReserved="false" android:title="@string/preferences_nimbus_experiments" app:isPreferenceVisible="false"/>
+          +        <androidx.preference.Preference android:key="@string/pref_key_start_profiler" app:iconSpaceReserved="false" android:title="@string/preferences_start_profiler" app:isPreferenceVisible="false"/>
+               </androidx.preference.PreferenceCategory>
+           </androidx.preference.PreferenceScreen>
+          diff --git a/kiwi-tools/audit.py b/kiwi-tools/audit.py
+          index 071d2a3..340bdb8 100755
+          --- a/kiwi-tools/audit.py
+          +++ b/kiwi-tools/audit.py
+          @@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
+           PREFS = ROOT / 'app/src/main/res/xml/customization_preferences.xml'
+           EN = ROOT / 'app/src/main/res/values/kiwi_display.xml'
+           DE = ROOT / 'app/src/main/res/values-de/kiwi_display.xml'
+          +OLED_EN = ROOT / 'app/src/main/res/values/kiwi_ui_02.xml'
+          +OLED_DE = ROOT / 'app/src/main/res/values-de/kiwi_ui_02.xml'
+           CTRL = ROOT / 'app/src/main/java/org/mozilla/fenix/settings/KiwiDisplayController.kt'
+           UI = ROOT / 'app/src/main/java/org/mozilla/fenix/settings/CustomizationFragment.kt'
+           HOME = ROOT / 'app/src/main/java/org/mozilla/fenix/HomeActivity.kt'
+          @@ -37,6 +39,13 @@ def audit():
+               home = HOME.read_text()
+               en = collect_resources(EN)
+               de = collect_resources(DE)
+          +    oled_en = collect_resources(OLED_EN) if OLED_EN.exists() else {}
+          +    oled_de = collect_resources(OLED_DE) if OLED_DE.exists() else {}
+          +    if set(oled_en) != set(oled_de):
+          +        problems.append('OLED UI German/English resource keys differ')
+          +    if set(en) & set(oled_en):
+          +        problems.append('Duplicate Kiwi resource keys across display and OLED resource files')
+          +    available = {**en, **oled_en}
+               prefs = ET.parse(PREFS)
+               controls = {}
+               for item in prefs.iter():
+          @@ -66,7 +75,7 @@ def audit():
+               for item in controls.values():
+                   for attr in ('title','summary','entries','entryValues'):
+                       value = item.get(PREFIX + attr)
+          -            if value and value.startswith('@') and value[1:].split('/')[1] not in en:
+          +            if value and value.startswith('@') and value[1:].split('/')[1] not in available:
+                           problems.append(f'Unresolved Kiwi string/array resource: {value}')
+               for key, binding in expected_bindings.items():
+                   if f'"{key}"' not in source:
+          @@ -85,6 +94,13 @@ def audit():
+                   problems.append('new controls are not linked to app runtime')
+               if 'kiwiDisplayController.release()' not in home:
+                   problems.append('window flag cleanup missing')
+          +    if OLED_EN.exists():
+          +        theme_app = (ROOT / 'app/src/main/java/org/mozilla/fenix/FenixApplication.kt').read_text()
+          +        theme_manager = (ROOT / 'app/src/main/java/org/mozilla/fenix/theme/ThemeManager.kt').read_text()
+          +        if 'Theme.Oled' not in theme_app or 'R.style.KiwiOledTheme' not in theme_manager:
+          +            problems.append('OLED app/Compose theme integration missing')
+          +        if 'https://addons.mozilla.org/android/addon/darkreader/' not in ui:
+          +            problems.append('Website dark-mode guidance link missing')
+               if 'Logger(' in UPDATER.read_text():
+                   problems.append('preference updater still logs value through Logger')
+               if (ROOT / 'android-components').is_dir() and any((ROOT / 'android-components').iterdir()):
+          KIWI_UI_02_PATCH
+          git apply --check "$RUNNER_TEMP/kiwi-ui-v021.patch"
+          git apply "$RUNNER_TEMP/kiwi-ui-v021.patch"
+          echo "Kiwi UI and OLED patch v0.2.1 applied"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK and NDK
+        run: ./automation/iceraven/install-sdk.sh
+
+      - name: Prepare Android Components and Python
+        run: |
+          ./automation/iceraven/patch_android_components.sh
+          ./automation/iceraven/setup_venv.sh
+
+      - name: Apply original Iceraven string-resource fixes
+        run: |
+          sed -i 's/Firefox/Iceraven/g' app/src/*/res/values*/*strings.xml
+          sed -i '/about_content/s/Mozilla/@forkmaintainers/' app/src/*/res/values*/*strings.xml
+          sed -i '/<string name="trackers_blocked_panel_categorical_num_trackers_blocked">/s/%s/%1$s/g; /<string name="trackers_blocked_panel_categorical_num_trackers_blocked">/s/%d/%2$d/g' app/src/*/res/values*/*strings.xml
+
+      - name: Static audit of customized settings and resources
+        run: python3 kiwi-tools/audit.py
+
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build arm64 and other debug APK variants
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=2g"
+        run: ./gradlew app:assembleForkDebug --stacktrace --no-daemon
+
+      - name: Collect APK output
+        run: |
+          mkdir -p preview-apks
+          find . -path '*/outputs/apk/*' -type f -name '*forkDebug*.apk' -exec cp -v {} preview-apks/ \;
+          find preview-apks -type f -name '*.apk' | grep -q .
+          ls -alh preview-apks/
+
+      - name: Upload installable debug APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: Iceraven-Kiwi-OLED-v021-APK
+          path: preview-apks/*.apk
+          retention-days: 14
+          if-no-files-found: error
