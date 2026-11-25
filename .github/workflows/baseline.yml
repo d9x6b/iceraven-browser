@@ -85,9 +85,36 @@ jobs:
         run: |
           sdk="$HOME/android-sdk/android-sdk-linux"
           tools="$sdk/build-tools/37.0.0"
-          unsigned="gradle/build/app/outputs/apk/forkRelease/app-arm64-v8a-forkRelease.apk"
-          test -f "$unsigned"
-          test -x "$tools/apksigner"
+          for tool in apksigner aapt2; do
+            if [[ ! -x "$tools/$tool" ]]; then
+              echo "::error::Missing Android build tool: $tools/$tool"
+              exit 1
+            fi
+          done
+          # Discover the output instead of assuming AGP's unsigned APK filename.
+          unsigned="$(python - <<'PY'
+          from pathlib import Path
+          import sys
+          import zipfile
+
+          roots = (Path('gradle/build/app/outputs/apk'), Path('app/build/outputs/apk'))
+          candidates = sorted({p.resolve() for root in roots for p in root.rglob('*.apk')
+                               if 'forkrelease' in str(p.parent).lower()})
+          matches = []
+          for p in candidates:
+              with zipfile.ZipFile(p) as z:
+                  abis = {n.split('/')[1] for n in z.namelist()
+                          if n.startswith('lib/') and n.endswith('.so')}
+              print(f'APK candidate: {p}, ABIs: {sorted(abis)}', file=sys.stderr)
+              if abis == {'arm64-v8a'}:
+                  matches.append(p)
+          if len(matches) != 1:
+              sys.exit(f'Expected one ARM64-only release APK, found {len(matches)}')
+          print(matches[0])
+          PY
+          )"
+          echo "Selected APK: $unsigned"
+          ls -lh "$unsigned"
           mkdir -p baseline-artifact
           keystore="$RUNNER_TEMP/baseline-test.p12"
           # Disposable test identity only. Never use for a production release.
