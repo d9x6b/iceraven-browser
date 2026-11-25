@@ -1,0 +1,63 @@
+name: Dependency audit
+
+on:
+  pull_request:
+    branches: [dev/baseline]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev/dependency-audit')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source and pinned submodule
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: 'true'
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          java-version: 17
+          distribution: temurin
+      - name: Prepare upstream build inputs
+        shell: bash
+        run: |
+          bash -e -o pipefail automation/iceraven/install-sdk.sh
+          bash -e -o pipefail automation/iceraven/patch_android_components.sh
+          bash -e -o pipefail automation/iceraven/setup_venv.sh
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+      - name: Collect dependency reports
+        shell: bash
+        run: |
+          mkdir -p dependency-audit
+          git rev-parse HEAD > dependency-audit/revision.txt
+          git submodule status >> dependency-audit/revision.txt
+          ./gradlew --version > dependency-audit/gradle-version.txt
+          ./gradlew :app:buildEnvironment --console=plain --no-daemon > dependency-audit/build-environment.txt 2>&1
+          ./gradlew :app:dependencies --configuration forkReleaseRuntimeClasspath --console=plain --no-daemon > dependency-audit/runtime-dependencies.txt 2>&1
+          ./gradlew :app:dependencyInsight --dependency tink --configuration forkReleaseRuntimeClasspath --console=plain --no-daemon > dependency-audit/runtime-tink.txt 2>&1
+          ./gradlew :app:dependencyInsight --dependency protobuf --configuration forkReleaseRuntimeClasspath --console=plain --no-daemon > dependency-audit/runtime-protobuf.txt 2>&1
+          ./gradlew :app:writeRuntimeDependenciesForkRelease --console=plain --no-daemon > dependency-audit/runtime-inventory-task.txt 2>&1
+          report=gradle/build/app/sbom/forkRelease-runtime-dependencies.json
+          if [[ ! -f "$report" ]]; then report=app/build/sbom/forkRelease-runtime-dependencies.json; fi
+          test -f "$report"
+          cp "$report" dependency-audit/
+      - name: Upload dependency audit records
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-audit-${{ github.run_id }}
+          path: dependency-audit/
+          if-no-files-found: warn
+          retention-days: 14
