@@ -77,8 +77,11 @@ class DefaultPrivacyPreferencesRepository(
             PreferenceType.UsageData -> {
                 settings.isTelemetryEnabled = enabled
                 crashReporter.setTelemetryEnabled(enabled)
-                settings.isExperimentationEnabled = enabled
-                nimbusSdk.experimentParticipation = enabled
+                // Enabling usage data is not consent to participate in studies.
+                if (!enabled) {
+                    settings.isExperimentationEnabled = false
+                    nimbusSdk.experimentParticipation = false
+                }
 
                 // Reset experiment identifiers on both opt-in and opt-out; it's likely
                 // that in future we will need to pass in the new telemetry client_id
