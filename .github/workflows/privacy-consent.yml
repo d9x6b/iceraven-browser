@@ -77,7 +77,44 @@ jobs:
         env:
           GRADLE_OPTS: '-Dorg.gradle.jvmargs="-XX:MaxMetaspaceSize=4g -Xms1g -Xmx7g"'
         run: |
-          ./gradlew :app:testForkDebugUnitTest --tests 'org.mozilla.fenix.dataChoicesStore.DataChoicesMiddlewareTest' --tests 'org.mozilla.fenix.onboarding.store.DefaultPrivacyPreferencesRepositoryTest' --stacktrace --no-daemon
+          mkdir -p consent-diagnostics
+          ./gradlew :app:tasks --all --console=plain --no-daemon | tee consent-diagnostics/gradle-tasks.txt
+          # Use a real task advertised by this revision, rather than assuming
+          # custom build types have a corresponding unit-test task.
+          task="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          tasks = set(re.findall(r'^\s*(?:app:)?(test\w+(?:UnitTest|HostTest))(?=\s|$)', Path('consent-diagnostics/gradle-tasks.txt').read_text(), re.M))
+          for candidate in ('testForkDebugUnitTest', 'testForkDebugHostTest', 'testDebugUnitTest', 'testDebugHostTest', 'testForkReleaseUnitTest', 'testForkReleaseHostTest'):
+              if candidate in tasks:
+                  print(candidate)
+                  break
+          else:
+              raise SystemExit(f'No supported Fenix unit-test task found. Available: {sorted(tasks)}')
+          PY
+          )"
+          echo "Selected Gradle test task: :app:$task"
+          printf '%s\n' "$task" > consent-diagnostics/selected-task.txt
+          ./gradlew ":app:$task" --tests 'org.mozilla.fenix.dataChoicesStore.DataChoicesMiddlewareTest' --tests 'org.mozilla.fenix.onboarding.store.DefaultPrivacyPreferencesRepositoryTest' --stacktrace --no-daemon
+          # Do not treat a successful Gradle invocation with no executed tests as a pass.
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          expected = {
+              'org.mozilla.fenix.dataChoicesStore.DataChoicesMiddlewareTest',
+              'org.mozilla.fenix.onboarding.store.DefaultPrivacyPreferencesRepositoryTest',
+          }
+          executed = set()
+          task = Path('consent-diagnostics/selected-task.txt').read_text().strip()
+          for root in (Path('gradle/build/app/test-results'), Path('app/build/test-results')):
+              for report in (root / task).rglob('TEST-*.xml'):
+                  for case in ET.parse(report).iter('testcase'):
+                      if case.find('skipped') is None:
+                          executed.add(case.get('classname'))
+          if not expected <= executed:
+              raise SystemExit(f'Missing executed consent test classes: {sorted(expected - executed)}')
+          print('Verified execution of both consent test classes.')
+          PY
 
       - name: Upload consent test reports
         if: always()
@@ -85,8 +122,9 @@ jobs:
         with:
           name: privacy-consent-tests-${{ github.run_id }}
           path: |
-            gradle/build/app/test-results/testForkDebugUnitTest/
-            app/build/test-results/testForkDebugUnitTest/
+            consent-diagnostics/
+            gradle/build/app/test-results/
+            app/build/test-results/
           if-no-files-found: warn
           retention-days: 14
 
