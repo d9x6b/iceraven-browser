@@ -90,7 +90,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-
+      - name: Build release-like ARM64 baseline
         shell: bash
         env:
           GRADLE_OPTS: '-Dorg.gradle.jvmargs="-XX:MaxMetaspaceSize=4g -Xms1g -Xmx7g -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/dev/stderr"'
