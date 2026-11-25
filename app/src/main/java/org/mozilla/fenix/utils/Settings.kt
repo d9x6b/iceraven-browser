@@ -862,12 +862,11 @@ class Settings(
     var isExperimentationEnabled by
         booleanPreference(
             appContext.getPreferenceKey(R.string.pref_key_experimentation_v2),
-            default = isTelemetryEnabled,
+            default = false,
         )
 
     /**
-     * This lets us know if the user has disabled experimentation manually so that we know if we should re-enable
-     * experimentation if the user disables and re-enables telemetry.
+     * Records whether the user has explicitly disabled experimentation.
      */
     var hasUserDisabledExperimentation by
         booleanPreference(
