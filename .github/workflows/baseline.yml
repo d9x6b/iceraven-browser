@@ -130,10 +130,29 @@ jobs:
           printf '%s\n' 'Test-only APK. Signing key changes each build: uninstall previous baseline before updating; test profile data will be lost.' > baseline-artifact/README.txt
           rm -f "$keystore"
 
+          # Export the original unsigned APK for owner-controlled offline signing.
+          # Only public build records are copied; no keystore is uploaded.
+          mkdir -p baseline-unsigned
+          cp "$unsigned" baseline-unsigned/iceraven-baseline-arm64-unsigned.apk
+          "$tools/aapt2" dump badging baseline-unsigned/iceraven-baseline-arm64-unsigned.apk > baseline-unsigned/badging.txt
+          grep -F "package: name='io.github.forkmaintainers.iceraven.baseline'" baseline-unsigned/badging.txt
+          grep -F "'arm64-v8a'" baseline-unsigned/badging.txt
+          cp baseline-artifact/revision.txt baseline-unsigned/revision.txt
+          (cd baseline-unsigned && sha256sum iceraven-baseline-arm64-unsigned.apk > SHA256SUMS)
+          printf '%s\n' 'UNSIGNED APK: not installable until locally signed. Verify the checksum and revision, then follow Issue #2 for owner-controlled signing. Do not upload private keys.' > baseline-unsigned/README.txt
+
       - name: Upload test APK and verification records
         uses: actions/upload-artifact@v7
         with:
           name: iceraven-baseline-arm64-${{ github.run_id }}
           path: baseline-artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload unsigned APK for offline signing
+        uses: actions/upload-artifact@v7
+        with:
+          name: iceraven-baseline-unsigned-arm64-${{ github.run_id }}
+          path: baseline-unsigned/
           if-no-files-found: error
           retention-days: 14
