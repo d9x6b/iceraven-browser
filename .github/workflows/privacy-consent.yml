@@ -1,0 +1,261 @@
+name: Scoped privacy consent validation
+
+on:
+  pull_request:
+    branches: [dev/baseline]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privacy-consent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev/privacy-consent')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source and pinned submodule
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: 'true'
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Prepare SDK and upstream build inputs
+        shell: bash
+        run: |
+          bash -e -o pipefail automation/iceraven/install-sdk.sh
+          bash -e -o pipefail automation/iceraven/patch_android_components.sh
+          bash -e -o pipefail automation/iceraven/setup_venv.sh
+          git submodule status
+          free -h
+
+      - name: Prepare isolated test identity and upstream branding
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/build.gradle')
+          s = p.read_text()
+          start = s.index('        forkRelease releaseTemplate >> {')
+          end = s.index('        benchmark releaseTemplate >> {', start)
+          block = s[start:end]
+          replacements = {
+              'applicationIdSuffix ".iceraven"': 'applicationIdSuffix ".iceraven.baseline"',
+              'def deepLinkSchemeValue = "iceraven"': 'def deepLinkSchemeValue = "iceraven-baseline"',
+              '"io.github.forkmaintainers.iceraven.sharedID"': '"io.github.forkmaintainers.iceraven.baseline.sharedID"',
+          }
+          for old, new in replacements.items():
+              if block.count(old) != 1:
+                  raise SystemExit(f'Expected exactly one occurrence: {old}')
+              block = block.replace(old, new)
+          p.write_text(s[:start] + block + s[end:])
+          PY
+          sed -i 's/Firefox/Iceraven/g' app/src/*/res/values*/*strings.xml
+          sed -i '/about_content/s/Mozilla/@forkmaintainers/' app/src/*/res/values*/*strings.xml
+          sed -i '/<string name="trackers_blocked_panel_categorical_num_trackers_blocked">/s/%s/%1$s/g; /<string name="trackers_blocked_panel_categorical_num_trackers_blocked">/s/%d/%2$d/g' app/src/*/res/values*/*strings.xml
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+
+      - name: Run scoped consent regression tests (full suite blocked by issue 9)
+        shell: bash
+        env:
+          GRADLE_OPTS: '-Dorg.gradle.jvmargs="-XX:MaxMetaspaceSize=4g -Xms1g -Xmx7g"'
+        run: |
+          mkdir -p consent-diagnostics
+          ./gradlew :app:tasks --all --console=plain --no-daemon | tee consent-diagnostics/gradle-tasks.txt
+          # Use a real task advertised by this revision, rather than assuming
+          # custom build types have a corresponding unit-test task.
+          task="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          tasks = set(re.findall(r'^\s*(?:app:)?(test\w+(?:UnitTest|HostTest))(?=\s|$)', Path('consent-diagnostics/gradle-tasks.txt').read_text(), re.M))
+          for candidate in ('testForkDebugUnitTest', 'testForkDebugHostTest', 'testDebugUnitTest', 'testDebugHostTest', 'testForkReleaseUnitTest', 'testForkReleaseHostTest'):
+              if candidate in tasks:
+                  print(candidate)
+                  break
+          else:
+              raise SystemExit(f'No supported Fenix unit-test task found. Available: {sorted(tasks)}')
+          PY
+          )"
+          echo "Selected Gradle test task: :app:$task"
+          printf '%s\n' "$task" > consent-diagnostics/selected-task.txt
+          # Scoped consent validation only. Full test compilation is blocked by
+          # eight unchanged legacy files (Issue #9, run 45725729891).
+          # Stage only these exact known-broken blobs outside the source tree
+          # for this invocation. Restore them even if Gradle fails.
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import tempfile
+
+          root = Path('app/src/test/java/org/mozilla/fenix')
+          blocked = {
+              'components/PlayStoreReviewPromptControllerTest.kt': '7b047dbefafc40a72899053df9006b58d9138a4f',
+              'components/metrics/AdjustMetricsServiceTest.kt': '652d9cada6669d3a9937b407bc7c9f6687b4bd78',
+              'components/metrics/InstallReferrerWorkerTest.kt': '61f21dd3be307a9633c5bf5735a7596483181735',
+              'components/metrics/MetricControllerTest.kt': '892e37f04c28940e0365cd523280eb34076b839d',
+              'components/metrics/MetricsUtilsTest.kt': '2c9614dddf0a7dfb03770bb6e06b1c33d4135982',
+              'ipprotection/store/IPProtectionOnboardingPromptTest.kt': '36614beb589495a88b9d9c3bcadc055375359f6e',
+              'pbmlock/PrivateBrowsingLockFeatureTest.kt': 'b17aa3a3590acfbc060066ff7f49cfd38fc2e26a',
+              'settings/HomeSettingsFragmentTest.kt': 'e08128c0b7cad6da9a9213b26bc86eb343d350e8',
+          }
+          for name, expected in blocked.items():
+              actual = subprocess.check_output(['git', 'hash-object', str(root / name)], text=True).strip()
+              if actual != expected:
+                  raise SystemExit(f'Legacy test changed: {name}; review Issue #9 before proceeding')
+          scope = 'SCOPED CONSENT TESTS ONLY; FULL SUITE BLOCKED (Issue #9)\n' + '\n'.join(blocked) + '\n'
+          Path('consent-diagnostics/test-scope.txt').write_text(scope)
+          print(scope, flush=True)
+          task = Path('consent-diagnostics/selected-task.txt').read_text().strip()
+          with tempfile.TemporaryDirectory(prefix='iceraven-legacy-tests-') as temp:
+              staged = []
+              try:
+                  for name in blocked:
+                      original = root / name
+                      backup = Path(temp) / name
+                      backup.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.move(str(original), str(backup))
+                      staged.append((original, backup))
+                  subprocess.run([
+                      './gradlew', ':app:' + task,
+                      '--tests', 'org.mozilla.fenix.dataChoicesStore.DataChoicesMiddlewareTest',
+                      '--tests', 'org.mozilla.fenix.onboarding.store.DefaultPrivacyPreferencesRepositoryTest',
+                      '--stacktrace', '--no-daemon',
+                  ], check=True)
+              finally:
+                  for original, backup in reversed(staged):
+                      shutil.move(str(backup), str(original))
+          PY
+          # Do not treat a successful Gradle invocation with no executed tests as a pass.
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          expected = {
+              'org.mozilla.fenix.dataChoicesStore.DataChoicesMiddlewareTest',
+              'org.mozilla.fenix.onboarding.store.DefaultPrivacyPreferencesRepositoryTest',
+          }
+          executed = set()
+          task = Path('consent-diagnostics/selected-task.txt').read_text().strip()
+          for root in (Path('gradle/build/app/test-results'), Path('app/build/test-results')):
+              for report in (root / task).rglob('TEST-*.xml'):
+                  for case in ET.parse(report).iter('testcase'):
+                      if case.find('skipped') is None:
+                          executed.add(case.get('classname'))
+          if not expected <= executed:
+              raise SystemExit(f'Missing executed consent test classes: {sorted(expected - executed)}')
+          print('Verified execution of both consent test classes.')
+          PY
+
+      - name: Upload consent test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: privacy-consent-tests-${{ github.run_id }}
+          path: |
+            consent-diagnostics/
+            gradle/build/app/test-results/
+            app/build/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Build release-like ARM64 baseline
+        shell: bash
+        env:
+          GRADLE_OPTS: '-Dorg.gradle.jvmargs="-XX:MaxMetaspaceSize=4g -Xms1g -Xmx7g -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/dev/stderr"'
+        run: |
+          version="$(git describe --tags --always HEAD)"
+          /usr/bin/time -v ./gradlew app:assembleForkRelease -PversionName="$version" -PbenchmarkTest --stacktrace --no-daemon
+
+      - name: Sign and verify disposable test APK
+        shell: bash
+        run: |
+          sdk="$HOME/android-sdk/android-sdk-linux"
+          tools="$sdk/build-tools/37.0.0"
+          for tool in apksigner aapt2; do
+            if [[ ! -x "$tools/$tool" ]]; then
+              echo "::error::Missing Android build tool: $tools/$tool"
+              exit 1
+            fi
+          done
+          # Discover the output instead of assuming AGP's unsigned APK filename.
+          unsigned="$(python - <<'PY'
+          from pathlib import Path
+          import sys
+          import zipfile
+
+          roots = (Path('gradle/build/app/outputs/apk'), Path('app/build/outputs/apk'))
+          candidates = sorted({p.resolve() for root in roots for p in root.rglob('*.apk')
+                               if 'forkrelease' in str(p.parent).lower()})
+          matches = []
+          for p in candidates:
+              with zipfile.ZipFile(p) as z:
+                  abis = {n.split('/')[1] for n in z.namelist()
+                          if n.startswith('lib/') and n.endswith('.so')}
+              print(f'APK candidate: {p}, ABIs: {sorted(abis)}', file=sys.stderr)
+              if abis == {'arm64-v8a'}:
+                  matches.append(p)
+          if len(matches) != 1:
+              sys.exit(f'Expected one ARM64-only release APK, found {len(matches)}')
+          print(matches[0])
+          PY
+          )"
+          echo "Selected APK: $unsigned"
+          ls -lh "$unsigned"
+          mkdir -p baseline-artifact
+          keystore="$RUNNER_TEMP/baseline-test.p12"
+          # Disposable test identity only. Never use for a production release.
+          keytool -genkeypair -keystore "$keystore" -storetype PKCS12 -storepass baseline-test-only -keypass baseline-test-only -alias baseline -keyalg RSA -keysize 2048 -validity 365 -dname 'CN=Iceraven disposable baseline test'
+          "$tools/apksigner" sign --ks "$keystore" --ks-key-alias baseline --ks-pass pass:baseline-test-only --key-pass pass:baseline-test-only --out baseline-artifact/iceraven-baseline-arm64.apk "$unsigned"
+          "$tools/apksigner" verify --verbose --print-certs baseline-artifact/iceraven-baseline-arm64.apk > baseline-artifact/signature.txt
+          "$tools/aapt2" dump badging baseline-artifact/iceraven-baseline-arm64.apk > baseline-artifact/badging.txt
+          grep -F "package: name='io.github.forkmaintainers.iceraven.baseline'" baseline-artifact/badging.txt
+          grep -F "'arm64-v8a'" baseline-artifact/badging.txt
+          git rev-parse HEAD > baseline-artifact/revision.txt
+          git submodule status >> baseline-artifact/revision.txt
+          (cd baseline-artifact && sha256sum iceraven-baseline-arm64.apk > SHA256SUMS)
+          printf '%s\n' 'Test-only APK. Signing key changes each build: uninstall previous baseline before updating; test profile data will be lost.' > baseline-artifact/README.txt
+          rm -f "$keystore"
+
+          # Export the original unsigned APK for owner-controlled offline signing.
+          # Only public build records are copied; no keystore is uploaded.
+          mkdir -p baseline-unsigned
+          cp "$unsigned" baseline-unsigned/iceraven-baseline-arm64-unsigned.apk
+          "$tools/aapt2" dump badging baseline-unsigned/iceraven-baseline-arm64-unsigned.apk > baseline-unsigned/badging.txt
+          grep -F "package: name='io.github.forkmaintainers.iceraven.baseline'" baseline-unsigned/badging.txt
+          grep -F "'arm64-v8a'" baseline-unsigned/badging.txt
+          cp baseline-artifact/revision.txt baseline-unsigned/revision.txt
+          (cd baseline-unsigned && sha256sum iceraven-baseline-arm64-unsigned.apk > SHA256SUMS)
+          printf '%s\n' 'UNSIGNED APK: not installable until locally signed. Verify the checksum and revision, then follow Issue #2 for owner-controlled signing. Do not upload private keys.' > baseline-unsigned/README.txt
+
+      - name: Upload test APK and verification records
+        uses: actions/upload-artifact@v7
+        with:
+          name: iceraven-privacy-arm64-${{ github.run_id }}
+          path: baseline-artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload unsigned APK for offline signing
+        uses: actions/upload-artifact@v7
+        with:
+          name: iceraven-privacy-unsigned-arm64-${{ github.run_id }}
+          path: baseline-unsigned/
+          if-no-files-found: error
+          retention-days: 14

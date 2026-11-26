@@ -82,7 +82,7 @@ class DataChoicesMiddlewareTest {
     }
 
     @Test
-    fun `when telemetry is clicked then telemetry and experimentation are toggled and components are notified`() =
+    fun `when telemetry is disabled then experimentation is also disabled and components are notified`() =
         runTest {
             every { settings.isTelemetryEnabled } returns true
             every { settings.isExperimentationEnabled } returns true
@@ -99,6 +99,23 @@ class DataChoicesMiddlewareTest {
             verify { nimbus.resetTelemetryIdentifiers() }
             verify { engine.notifyTelemetryPrefChanged(false) }
         }
+
+    @Test
+    fun `when telemetry is enabled then studies are not enabled automatically`() = runTest {
+        every { settings.isTelemetryEnabled } returns false
+        every { settings.isExperimentationEnabled } returns false
+        every { settings.hasUserDisabledExperimentation } returns false
+
+        val store = makeStore(this)
+        store.dispatch(ChoiceAction.TelemetryClicked)
+
+        verify { settings.isTelemetryEnabled = true }
+        verify { metrics.start(MetricServiceType.Data) }
+        verify { engine.notifyTelemetryPrefChanged(true) }
+        verify { crashReporter.setTelemetryEnabled(true) }
+        verify(exactly = 0) { settings.isExperimentationEnabled = true }
+        verify(exactly = 0) { nimbus.experimentParticipation = true }
+    }
 
     @Test
     fun `when measurement data is clicked then marketing telemetry is toggled`() = runTest {

@@ -109,10 +109,7 @@ internal class DataChoicesMiddleware(
         if (newValue) {
             metrics.start(MetricServiceType.Data)
             crashReporter.setTelemetryEnabled(true)
-            if (!settings.hasUserDisabledExperimentation) {
-                settings.isExperimentationEnabled = true
-                nimbusSdk.experimentParticipation = true
-            }
+            // Studies require a separate, explicit opt-in.
             engine.notifyTelemetryPrefChanged(true)
         } else {
             metrics.stop(MetricServiceType.Data)
