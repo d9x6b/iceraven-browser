@@ -32,7 +32,6 @@ import androidx.annotation.IdRes
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.ActionBar
 import androidx.appcompat.widget.Toolbar
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.net.toUri
 import androidx.core.os.BundleCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -172,6 +171,7 @@ import org.mozilla.fenix.ipprotection.store.ErrorMessages
 import org.mozilla.fenix.ipprotection.store.IPProtectionInfoPrompter
 import org.mozilla.fenix.messaging.FenixMessageSurfaceId
 import org.mozilla.fenix.messaging.MessageNotificationWorker
+import org.mozilla.fenix.messaging.canPollMarketingMessages
 import org.mozilla.fenix.nimbus.FxNimbus
 import org.mozilla.fenix.onboarding.ensureMarketingChannelExists
 import org.mozilla.fenix.onboarding.seedOnboardingCompletedTimestampForDebugIfNeeded
@@ -869,7 +869,7 @@ open class HomeActivity : LocaleAwareAppCompatActivity(), NavHostActivity, Crash
         lifecycleScope.launch(IO) {
             // Register the [MARKETING_CHANNEL_ID] channel so that it appears in the Android Settings App.
             ensureMarketingChannelExists(applicationContext)
-            if (NotificationManagerCompat.from(applicationContext).areNotificationsEnabled()) {
+            if (canPollMarketingMessages(applicationContext)) {
                 MessageNotificationWorker.setMessageNotificationWorker(applicationContext)
             } else {
                 MessageNotificationWorker.cancelMessageNotificationWorker(applicationContext)

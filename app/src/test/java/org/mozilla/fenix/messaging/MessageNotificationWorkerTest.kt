@@ -4,6 +4,7 @@
 
 package org.mozilla.fenix.messaging
 
+import android.app.NotificationManager
 import android.view.View
 import androidx.concurrent.futures.await
 import androidx.lifecycle.LifecycleOwner
@@ -45,6 +46,29 @@ class MessageNotificationWorkerTest {
     @After
     fun tearDown() {
         WorkManagerTestInitHelper.closeWorkDatabase()
+    }
+
+    @Test
+    fun `WHEN notifications are globally disabled THEN marketing polling is blocked`() {
+        assertFalse(shouldPollMarketingMessages(false, false, null))
+        assertFalse(shouldPollMarketingMessages(false, true, NotificationManager.IMPORTANCE_DEFAULT))
+    }
+
+    @Test
+    fun `WHEN marketing channel is blocked or missing THEN marketing polling is blocked`() {
+        assertFalse(shouldPollMarketingMessages(true, true, NotificationManager.IMPORTANCE_NONE))
+        assertFalse(shouldPollMarketingMessages(true, true, null))
+    }
+
+    @Test
+    fun `WHEN marketing channel is enabled THEN marketing polling is allowed`() {
+        assertTrue(shouldPollMarketingMessages(true, true, NotificationManager.IMPORTANCE_LOW))
+        assertTrue(shouldPollMarketingMessages(true, true, NotificationManager.IMPORTANCE_DEFAULT))
+    }
+
+    @Test
+    fun `WHEN Android has no notification channels THEN global notification permission is sufficient`() {
+        assertTrue(shouldPollMarketingMessages(true, false, null))
     }
 
     @Test
