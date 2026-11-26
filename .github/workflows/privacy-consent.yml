@@ -1,28 +1,27 @@
 name: Full source test repair validation
 
 on:
-  pull_request:
-    branches: [dev/privacy-consent]
-    types: [opened, synchronize, reopened]
+  push:
+    branches: [dev/test-suite-repair]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: test-suite-repair-${{ github.event.pull_request.number || github.ref }}
+  group: test-suite-repair-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   baseline:
-    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev/test-suite-repair')
+    if: github.ref == 'refs/heads/dev/test-suite-repair'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - name: Check out source and pinned submodule
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           submodules: 'true'
           fetch-depth: 0
           persist-credentials: false
