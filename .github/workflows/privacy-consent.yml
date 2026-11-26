@@ -1,4 +1,4 @@
-name: Privacy consent validation
+name: Scoped privacy consent validation
 
 on:
   pull_request:
@@ -72,7 +72,7 @@ jobs:
         with:
           cache-read-only: true
 
-      - name: Run consent regression tests
+      - name: Run scoped consent regression tests (full suite blocked by issue 9)
         shell: bash
         env:
           GRADLE_OPTS: '-Dorg.gradle.jvmargs="-XX:MaxMetaspaceSize=4g -Xms1g -Xmx7g"'
@@ -95,7 +95,54 @@ jobs:
           )"
           echo "Selected Gradle test task: :app:$task"
           printf '%s\n' "$task" > consent-diagnostics/selected-task.txt
-          ./gradlew ":app:$task" --tests 'org.mozilla.fenix.dataChoicesStore.DataChoicesMiddlewareTest' --tests 'org.mozilla.fenix.onboarding.store.DefaultPrivacyPreferencesRepositoryTest' --stacktrace --no-daemon
+          # Scoped consent validation only. Full test compilation is blocked by
+          # eight unchanged legacy files (Issue #9, run 45725729891).
+          # Stage only these exact known-broken blobs outside the source tree
+          # for this invocation. Restore them even if Gradle fails.
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import tempfile
+
+          root = Path('app/src/test/java/org/mozilla/fenix')
+          blocked = {
+              'components/PlayStoreReviewPromptControllerTest.kt': '7b047dbefafc40a72899053df9006b58d9138a4f',
+              'components/metrics/AdjustMetricsServiceTest.kt': '652d9cada6669d3a9937b407bc7c9f6687b4bd78',
+              'components/metrics/InstallReferrerWorkerTest.kt': '61f21dd3be307a9633c5bf5735a7596483181735',
+              'components/metrics/MetricControllerTest.kt': '892e37f04c28940e0365cd523280eb34076b839d',
+              'components/metrics/MetricsUtilsTest.kt': '2c9614dddf0a7dfb03770bb6e06b1c33d4135982',
+              'ipprotection/store/IPProtectionOnboardingPromptTest.kt': '36614beb589495a88b9d9c3bcadc055375359f6e',
+              'pbmlock/PrivateBrowsingLockFeatureTest.kt': 'b17aa3a3590acfbc060066ff7f49cfd38fc2e26a',
+              'settings/HomeSettingsFragmentTest.kt': 'e08128c0b7cad6da9a9213b26bc86eb343d350e8',
+          }
+          for name, expected in blocked.items():
+              actual = subprocess.check_output(['git', 'hash-object', str(root / name)], text=True).strip()
+              if actual != expected:
+                  raise SystemExit(f'Legacy test changed: {name}; review Issue #9 before proceeding')
+          scope = 'SCOPED CONSENT TESTS ONLY; FULL SUITE BLOCKED (Issue #9)\n' + '\n'.join(blocked) + '\n'
+          Path('consent-diagnostics/test-scope.txt').write_text(scope)
+          print(scope, flush=True)
+          task = Path('consent-diagnostics/selected-task.txt').read_text().strip()
+          with tempfile.TemporaryDirectory(prefix='iceraven-legacy-tests-') as temp:
+              staged = []
+              try:
+                  for name in blocked:
+                      original = root / name
+                      backup = Path(temp) / name
+                      backup.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.move(str(original), str(backup))
+                      staged.append((original, backup))
+                  subprocess.run([
+                      './gradlew', ':app:' + task,
+                      '--tests', 'org.mozilla.fenix.dataChoicesStore.DataChoicesMiddlewareTest',
+                      '--tests', 'org.mozilla.fenix.onboarding.store.DefaultPrivacyPreferencesRepositoryTest',
+                      '--stacktrace', '--no-daemon',
+                  ], check=True)
+              finally:
+                  for original, backup in reversed(staged):
+                      shutil.move(str(backup), str(original))
+          PY
           # Do not treat a successful Gradle invocation with no executed tests as a pass.
           python - <<'PY'
           from pathlib import Path
