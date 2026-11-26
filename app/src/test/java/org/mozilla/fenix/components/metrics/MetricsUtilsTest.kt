@@ -5,8 +5,6 @@
 package org.mozilla.fenix.components.metrics
 
 import com.google.android.gms.ads.identifier.AdvertisingIdClient
-import com.google.android.gms.common.GooglePlayServicesNotAvailableException
-import com.google.android.gms.common.GooglePlayServicesRepairableException
 import io.mockk.every
 import io.mockk.mockk
 import java.io.IOException
@@ -22,8 +20,8 @@ class MetricsUtilsTest {
     fun `getAdvertisingID() returns null if the API throws`() {
         val exceptions =
             listOf(
-                GooglePlayServicesNotAvailableException(1),
-                GooglePlayServicesRepairableException(0, "", mockk()),
+
+                NullPointerException(),
                 IllegalStateException(),
                 IOException(),
             )
