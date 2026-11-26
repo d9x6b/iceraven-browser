@@ -5,12 +5,15 @@
 package org.mozilla.fenix.messaging
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.annotation.VisibleForTesting
+import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import androidx.work.CoroutineWorker
@@ -66,6 +69,33 @@ private const val NIMBUS_UPDATE_OPERATION_TIMEOUT_MILLIS =
 private val LOGGER = Logger("MessageNotificationWorker")
 
 /**
+ * Android notification permission and the marketing channel are independent of telemetry consent.
+ * Never poll solely to produce notifications that Android will not display.
+ */
+internal fun shouldPollMarketingMessages(
+    notificationsEnabled: Boolean,
+    channelsSupported: Boolean,
+    marketingChannelImportance: Int?,
+): Boolean =
+    notificationsEnabled &&
+        (!channelsSupported ||
+            (marketingChannelImportance != null && marketingChannelImportance != NotificationManager.IMPORTANCE_NONE))
+
+internal fun canPollMarketingMessages(context: Context): Boolean {
+    val manager = NotificationManagerCompat.from(context)
+    if (!manager.areNotificationsEnabled()) return false
+
+    val channelsSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+    val importance = if (channelsSupported) {
+        manager.getNotificationChannel(ensureMarketingChannelExists(context))?.importance
+    } else {
+        null
+    }
+    return shouldPollMarketingMessages(true, channelsSupported, importance)
+}
+
+
+/**
  * Background [CoroutineWorker] that polls Nimbus for available [Message]s at a given interval. A [Notification] will be
  * created using the configuration of the next highest priority [Message] if it has not already been displayed.
  */
@@ -77,6 +107,9 @@ class MessageNotificationWorker(
     @SuppressWarnings("ReturnCount")
     override suspend fun doWork(): Result {
         val context = applicationContext
+        // Previously scheduled work may run after the user revokes notification permission.
+        if (!canPollMarketingMessages(context)) return Result.success()
+
         val nimbus = context.components.nimbus
 
         // Refresh messages from Nimbus to ensure getNextMessage reflects the latest available content.
@@ -87,6 +120,9 @@ class MessageNotificationWorker(
                 LOGGER.info("Failed to fetch and apply Nimbus experiments.")
             }
         }
+
+        // Do not mark messages as displayed if permission changed during the fetch.
+        if (!canPollMarketingMessages(context)) return Result.success()
 
         val messaging = nimbus.messaging
 
