@@ -27,10 +27,11 @@ internal class AdjustMetricsServiceTest {
         Event.GrowthData.ConversionEvent4,
         Event.GrowthData.ConversionEvent5,
         Event.GrowthData.ConversionEvent6,
-        Event.GrowthData.ConversionEvent7,
-        Event.GrowthData.ConversionEvent8,
-        Event.GrowthData.ConversionEvent9,
-        Event.GrowthData.ConversionEvent10,
+        Event.GrowthData.ConversionEvent7(fromSearch = false),
+        Event.GrowthData.ConversionEvent7(fromSearch = true),
+        Event.FirstWeekPostInstall.ConversionEvent8,
+        Event.FirstWeekPostInstall.ConversionEvent9,
+        Event.FirstWeekPostInstall.ConversionEvent10,
     )
 
     @Test
