@@ -34,11 +34,17 @@ class FontEnumerationWorker(
     @Suppress("TooGenericExceptionCaught")
     override suspend fun doWork(): Result =
         withContext(Dispatchers.IO) {
+            // A queued worker may outlive the user's telemetry consent.
+            if (!canEnumerateFonts(applicationContext)) return@withContext Result.success()
+
             try {
                 readAllFonts()
             } catch (e: Exception) {
                 return@withContext Result.retry()
             }
+
+            // Consent may have been withdrawn during file parsing.
+            if (!canEnumerateFonts(applicationContext)) return@withContext Result.success()
 
             Pings.fontList.submit()
 
@@ -77,15 +83,9 @@ class FontEnumerationWorker(
 
         /** Schedules the Activated User event if needed. */
         fun sendActivatedSignalIfNeeded(context: Context) {
+            if (!canEnumerateFonts(context)) return
+
             val instanceWorkManager = WorkManager.getInstance(context)
-
-            if (!Config.channel.isNightlyOrDebug) {
-                return
-            }
-
-            if (context.components.settings.numFontListSent >= DESIRED_SUBMISSIONS_NUMBER) {
-                return
-            }
 
             val fontEnumeratorWork =
                 OneTimeWorkRequest.Builder(FontEnumerationWorker::class.java)
@@ -136,4 +136,13 @@ class FontEnumerationWorker(
          */
         const val DESIRED_SUBMISSIONS_NUMBER: Int = 4
     }
+}
+
+/** Font diagnostics are optional telemetry, not a prerequisite for browsing. */
+internal fun shouldEnumerateFonts(telemetryEnabled: Boolean, diagnosticChannel: Boolean, submissionCount: Int): Boolean =
+    telemetryEnabled && diagnosticChannel && submissionCount < FontEnumerationWorker.DESIRED_SUBMISSIONS_NUMBER
+
+private fun canEnumerateFonts(context: Context): Boolean {
+    val settings = context.components.settings
+    return shouldEnumerateFonts(settings.isTelemetryEnabled, Config.channel.isNightlyOrDebug, settings.numFontListSent)
 }
