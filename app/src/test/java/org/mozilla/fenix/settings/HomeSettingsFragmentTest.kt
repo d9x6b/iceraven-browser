@@ -160,7 +160,7 @@ internal class HomeSettingsFragmentTest {
     private fun activateFragment() {
         val activity = Robolectric.buildActivity(FragmentActivity::class.java).create().get()
         homeSettingsFragment = HomeSettingsFragment()
-        homeSettingsFragment.worldCupHasEnded = { worldCupHasEnded }
+
 
         val mockCore: Core = mockk {
             every { pocketStoriesService } returns this@HomeSettingsFragmentTest.pocketService

@@ -247,11 +247,10 @@ class IPProtectionOnboardingPromptTest {
 
             startBinding(repository, store, onShowOnboarding = { shownCount++ })
 
-                store.dispatch(IPProtectionAction.EligibilityChanged(EligibilityStatus.Eligible))
-                testDispatcher.scheduler.advanceUntilIdle()
+            store.dispatch(IPProtectionAction.EligibilityChanged(EligibilityStatus.Eligible))
+            testDispatcher.scheduler.advanceUntilIdle()
 
-                assertEquals(1, shownCount)
-            }
+            assertEquals(1, shownCount)
         }
 
     @Test
@@ -267,11 +266,10 @@ class IPProtectionOnboardingPromptTest {
 
             startBinding(repository, store, onShowOnboarding = { shownCount++ })
 
-                store.dispatch(IPProtectionAction.EligibilityChanged(EligibilityStatus.Eligible))
-                testDispatcher.scheduler.advanceUntilIdle()
+            store.dispatch(IPProtectionAction.EligibilityChanged(EligibilityStatus.Eligible))
+            testDispatcher.scheduler.advanceUntilIdle()
 
-                assertEquals(0, shownCount)
-            }
+            assertEquals(0, shownCount)
         }
 
     private fun startBinding(

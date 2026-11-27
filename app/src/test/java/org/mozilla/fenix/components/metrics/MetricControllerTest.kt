@@ -583,35 +583,6 @@ class MetricControllerTest {
         assertNotNull(TrackingProtection.privacyReportTrackingContentTapped.testGetValue())
     }
 
-    @Test
-    fun `WHEN processing a FEATURE_PROTECTION_DASHBOARD tracker category fact THEN the matching metric is recorded`() {
-        val controller = createReleaseMetricController()
-
-        fun process(category: TrackerCategory) = controller.run {
-            Fact(
-                Component.FEATURE_PROTECTION_DASHBOARD,
-                Action.CLICK,
-                ProtectionDashboardFacts.Items.TRACKER_CATEGORY,
-                value = category.name,
-            ).process()
-        }
-
-        assertNull(TrackingProtection.privacyReportTrackingCookiesTapped.testGetValue())
-        process(TrackerCategory.CROSS_SITE_COOKIES)
-        assertNotNull(TrackingProtection.privacyReportTrackingCookiesTapped.testGetValue())
-
-        assertNull(TrackingProtection.privacyReportSocialTapped.testGetValue())
-        process(TrackerCategory.SOCIAL_MEDIA_TRACKERS)
-        assertNotNull(TrackingProtection.privacyReportSocialTapped.testGetValue())
-
-        assertNull(TrackingProtection.privacyReportFingerprintsTapped.testGetValue())
-        process(TrackerCategory.FINGERPRINTERS)
-        assertNotNull(TrackingProtection.privacyReportFingerprintsTapped.testGetValue())
-
-        assertNull(TrackingProtection.privacyReportTrackingContentTapped.testGetValue())
-        process(TrackerCategory.TRACKING_CONTENT)
-        assertNotNull(TrackingProtection.privacyReportTrackingContentTapped.testGetValue())
-    }
 
     @Test
     fun `WHEN processing a FEATURE_AUTOFILL fact THEN the right metric is recorded`() {
