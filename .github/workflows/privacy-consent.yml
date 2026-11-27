@@ -1,3 +1,4 @@
+# Manual CI trigger
 name: Full source test repair validation
 
 on:
